@@ -149,3 +149,14 @@ function json_(payload) {
     .createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+/**
+ * Ekspos fungsi ke globalThis. Loader memanggil fungsi ini lewat globalThis
+ * setelah eval(), sehingga tetap bekerja walau Apps Script V8 menjalankan kode
+ * dalam mode strict (function declaration hasil eval tidak selalu bocor ke
+ * scope fungsi pemanggil). Tanpa blok ini, loader bisa gagal dengan
+ * "handleGet_ is not defined".
+ */
+globalThis.handleGet_ = handleGet_;
+globalThis.handlePost_ = handlePost_;
+globalThis.runSetup_ = runSetup_;

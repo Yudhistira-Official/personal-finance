@@ -35,12 +35,26 @@ function pfFetchCore_() {
   return code;
 }
 
-// Titik masuk Web App — delegasikan ke fungsi di Code.gs hasil fetch.
-function doGet(e) { eval(pfFetchCore_()); return handleGet_(e); }
-function doPost(e) { eval(pfFetchCore_()); return handlePost_(e); }
+function pfJson_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Titik masuk Web App — eval Code.gs lalu panggil fungsinya lewat globalThis.
+function doGet(e) {
+  try { eval(pfFetchCore_()); return globalThis.handleGet_(e); }
+  catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
+}
+function doPost(e) {
+  try { eval(pfFetchCore_()); return globalThis.handlePost_(e); }
+  catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
+}
 
 // Jalankan sekali untuk membuat sheet + header.
-function setup() { eval(pfFetchCore_()); return runSetup_(); }
+function setup() {
+  eval(pfFetchCore_());
+  return globalThis.runSetup_();
+}
 ```
 
 5. Klik **Simpan**.
@@ -92,3 +106,16 @@ Base URL tidak boleh berisi parameter tambahan.
 ## Memperbarui Kode
 
 Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambil versi baru setelah cache 5 menit kedaluwarsa. Tidak perlu menempel ulang kode loader.
+
+## Troubleshooting
+
+| Gejala | Penyebab umum | Solusi |
+| --- | --- | --- |
+| `handleGet_ is not defined` / `runSetup_ is not defined` | Loader lama (sebelum fix `globalThis`) | Tempel ulang **KODE LOADER** terbaru di atas (versi `globalThis`), lalu Deploy ulang. |
+| `Gagal mengambil Code.gs dari GitHub (HTTP 404)` | URL raw salah / file belum di-push | Pastikan `database-core/Code.gs` sudah ada di branch `main` repo. |
+| Web App minta login / `401` | Akses deployment bukan "Anyone" | Deploy > Manage deployments > ubah *Who has access* ke **Anyone**. |
+| `Exception: Authorization required` saat `UrlFetchApp` | Izin eksternal belum diberikan | Jalankan `setup()` dari editor Apps Script sekali, klik **Review permissions → Allow**. |
+| Perubahan `Code.gs` belum terlihat | Cache loader 5 menit | Tunggu ~5 menit, atau naikkan `PF_CACHE_KEY` (mis. `pf_dbcore_v2`) untuk memaksa refresh. |
+| `SpreadsheetApp.getActiveSpreadsheet()` null | Script tidak terikat ke spreadsheet | Buat script lewat **Extensions > Apps Script** dari dalam spreadsheet (bukan project standalone). |
+
+> Setelah mengubah loader di editor, selalu klik **Deploy > Manage deployments > Edit > New version > Deploy**. Tanpa deploy ulang, Web App masih menjalankan versi lama.

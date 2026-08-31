@@ -35,7 +35,7 @@ function handlePost_(e) {
       return json_({ success: false, message: 'Action push dan transactions wajib diisi', pushed: 0 });
     }
 
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Transactions');
+    var sheet = getSs_().getSheetByName('Transactions');
     if (!sheet) {
       return json_({ success: false, message: 'Sheet Transactions belum dibuat', pushed: 0 });
     }
@@ -76,7 +76,7 @@ function handlePost_(e) {
  * @return {void}
  */
 function runSetup_() {
-  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var spreadsheet = getSs_();
   var schemas = {
     Transactions: ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'],
     Accounts: ['id', 'name', 'account_type', 'balance', 'is_active'],
@@ -99,7 +99,7 @@ function runSetup_() {
  * @return {Object[]} Baris data sebagai object.
  */
 function readSheet_(sheetName) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  var sheet = getSs_().getSheetByName(sheetName);
   if (!sheet || sheet.getLastRow() < 2) return [];
 
   var values = sheet.getDataRange().getValues();
@@ -121,7 +121,7 @@ function readSheet_(sheetName) {
  * @return {void}
  */
 function appendRow_(sheetName, values) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  var sheet = getSs_().getSheetByName(sheetName);
   if (!sheet) throw new Error('Sheet ' + sheetName + ' belum dibuat');
   sheet.appendRow(values);
 }
@@ -148,6 +148,20 @@ function json_(payload) {
   return ContentService
     .createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Ambil spreadsheet aktif dengan pesan error yang jelas.
+ * getActiveSpreadsheet() mengembalikan null bila script dibuat standalone
+ * (bukan lewat Extensions > Apps Script di dalam spreadsheet).
+ * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
+ */
+function getSs_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error('Script tidak terikat ke spreadsheet. Buka Google Sheet > Extensions > Apps Script, bukan project standalone.');
+  }
+  return ss;
 }
 
 /**

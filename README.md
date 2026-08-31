@@ -80,8 +80,16 @@ Database Core adalah **endpoint Google Apps Script** yang menjadi "database" awa
  */
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
-const PF_CACHE_KEY = 'pf_dbcore_v2';
+const PF_CACHE_KEY = 'pf_dbcore_v3';
 const PF_CACHE_TTL = 300; // detik
+
+// Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam
+// eval() (Code.gs dari GitHub) sehingga TIDAK terdeteksi analyzer scope Apps
+// Script. Baris ini memaksa scope "spreadsheets" diminta saat otorisasi,
+// tanpa itu setup()/push()/fetch() gagal dengan "permissions are not sufficient".
+function pfScopeHint_() {
+  return [SpreadsheetApp.getActiveSpreadsheet, UrlFetchApp.fetch, CacheService.getScriptCache, ContentService.createTextOutput];
+}
 
 function pfFetchCore_() {
   var cache = CacheService.getScriptCache();
@@ -105,16 +113,19 @@ function pfJson_(obj) {
 
 // Titik masuk Web App — eval Code.gs lalu panggil fungsinya lewat globalThis.
 function doGet(e) {
+  pfScopeHint_();
   try { eval(pfFetchCore_()); return globalThis.handleGet_(e); }
   catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
 }
 function doPost(e) {
+  pfScopeHint_();
   try { eval(pfFetchCore_()); return globalThis.handlePost_(e); }
   catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
 }
 
 // Jalankan sekali untuk membuat sheet + header.
 function setup() {
+  pfScopeHint_();
   eval(pfFetchCore_());
   return globalThis.runSetup_();
 }

@@ -17,8 +17,16 @@ Database Core adalah endpoint Google Apps Script untuk sinkronisasi dua arah apl
  */
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
-const PF_CACHE_KEY = 'pf_dbcore_v2';
+const PF_CACHE_KEY = 'pf_dbcore_v3';
 const PF_CACHE_TTL = 300; // detik
+
+// Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam
+// eval() (Code.gs dari GitHub) sehingga TIDAK terdeteksi analyzer scope Apps
+// Script. Baris ini memaksa scope "spreadsheets" diminta saat otorisasi,
+// tanpa itu setup()/push()/fetch() gagal dengan "permissions are not sufficient".
+function pfScopeHint_() {
+  return [SpreadsheetApp.getActiveSpreadsheet, UrlFetchApp.fetch, CacheService.getScriptCache, ContentService.createTextOutput];
+}
 
 function pfFetchCore_() {
   var cache = CacheService.getScriptCache();
@@ -42,16 +50,19 @@ function pfJson_(obj) {
 
 // Titik masuk Web App — eval Code.gs lalu panggil fungsinya lewat globalThis.
 function doGet(e) {
+  pfScopeHint_();
   try { eval(pfFetchCore_()); return globalThis.handleGet_(e); }
   catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
 }
 function doPost(e) {
+  pfScopeHint_();
   try { eval(pfFetchCore_()); return globalThis.handlePost_(e); }
   catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
 }
 
 // Jalankan sekali untuk membuat sheet + header.
 function setup() {
+  pfScopeHint_();
   eval(pfFetchCore_());
   return globalThis.runSetup_();
 }
@@ -111,6 +122,7 @@ Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambi
 
 | Gejala | Penyebab umum | Solusi |
 | --- | --- | --- |
+| `Exception: Specified permissions are not sufficient ... spreadsheets` | Scope `spreadsheets` tidak diminta (karena kode SpreadsheetApp tersembunyi di `eval`) | Tempel loader **versi `pfScopeHint_`** terbaru, jalankan `setup()` lagi, lalu **Review permissions → Allow** untuk menyetujui scope baru. |
 | `handleGet_ is not defined` / `runSetup_ is not defined` | Loader lama (sebelum fix `globalThis`) | Tempel ulang **KODE LOADER** terbaru di atas (versi `globalThis`), lalu Deploy ulang. |
 | `Gagal mengambil Code.gs dari GitHub (HTTP 404)` | URL raw salah / file belum di-push | Pastikan `database-core/Code.gs` sudah ada di branch `main` repo. |
 | Web App minta login / `401` | Akses deployment bukan "Anyone" | Deploy > Manage deployments > ubah *Who has access* ke **Anyone**. |

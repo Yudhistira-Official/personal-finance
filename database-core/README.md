@@ -1,116 +1,94 @@
-# Database Core — Google Apps Script Web App
+# Database Core — Endpoint Sinkronisasi
 
-Database Core adalah endpoint sinkronisasi untuk aplikasi **Personal Finance** (Tauri v2 + Rust).
-Endpoint ini menerima data dari aplikasi desktop (`sync_push`), mengirim balik data saat diminta
-(`sync_fetch`), serta memberi sinyal hidup untuk `sync_test`.
+Database Core adalah endpoint Google Apps Script untuk sinkronisasi dua arah aplikasi **Personal Finance** dengan Google Spreadsheet milik user.
 
-## Persiapan Spreadsheet
+## Cara Pasang (Loader)
 
-1. Buka [Google Sheets](https://sheets.google.com) dan buat spreadsheet baru.
-2. Buka menu **Extensions → Apps Script**.
-3. Hapus isi editor, lalu tempel seluruh kode dari `Code.gs`.
-4. Klik **Simpan** (Ctrl+S), beri nama proyek misalnya `Personal Finance DB Core`.
+1. Buat spreadsheet baru di [Google Sheets](https://sheets.google.com).
+2. Buka **Extensions > Apps Script**.
+3. Hapus isi editor.
+4. Tempel **KODE LOADER** berikut ke editor:
+
+```javascript
+/**
+ * Personal Finance — Database Core (LOADER)
+ * Tempel kode ini di editor Google Apps Script. Kode inti (Code.gs) diambil
+ * otomatis dari GitHub, jadi tidak perlu copy-paste manual dan selalu terbaru.
+ */
+const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
+const PF_CORE_FILE = 'Code.gs';
+const PF_CACHE_KEY = 'pf_dbcore_v1';
+const PF_CACHE_TTL = 300; // detik
+
+function pfFetchCore_() {
+  var cache = CacheService.getScriptCache();
+  var code = cache.get(PF_CACHE_KEY);
+  if (!code) {
+    var res = UrlFetchApp.fetch(PF_RAW_BASE + PF_CORE_FILE, { muteHttpExceptions: true });
+    var status = res.getResponseCode();
+    if (status !== 200) {
+      throw new Error('Gagal mengambil ' + PF_CORE_FILE + ' dari GitHub (HTTP ' + status + ').');
+    }
+    code = res.getContentText();
+    cache.put(PF_CACHE_KEY, code, PF_CACHE_TTL);
+  }
+  return code;
+}
+
+// Titik masuk Web App — delegasikan ke fungsi di Code.gs hasil fetch.
+function doGet(e) { eval(pfFetchCore_()); return handleGet_(e); }
+function doPost(e) { eval(pfFetchCore_()); return handlePost_(e); }
+
+// Jalankan sekali untuk membuat sheet + header.
+function setup() { eval(pfFetchCore_()); return runSetup_(); }
+```
+
+5. Klik **Simpan**.
+
+Loader mengambil `Code.gs` terbaru dari GitHub otomatis. Saat pertama dijalankan, Apps Script membutuhkan izin akses internet untuk `UrlFetchApp`.
 
 ## Menjalankan setup()
 
-1. Di editor Apps Script, pilih fungsi `setup` pada dropdown di toolbar.
-2. Klik **Run** (▶). Saat diminta izin, klik **Review permissions** → pilih akun → **Allow**.
-3. `setup()` akan membuat 4 sheet dengan header tebal (bold):
-   - `Transactions`: id, date, type, account_id, category_id, amount, note, updated_at
-   - `Accounts`: id, name, account_type, balance, is_active
-   - `Savings`: id, name, target_amount, current_amount, linked_account_id
-   - `Categories`: id, name, type, icon, color
+1. Pilih fungsi `setup` di toolbar Apps Script.
+2. Klik **Run**.
+3. Izinkan akses saat diminta.
 
-> Sheet yang sudah ada tidak dihapus; hanya header baris pertama yang dipastikan sesuai.
+`setup()` membuat 4 sheet beserta header bold:
+
+- `Transactions`: `id`, `date`, `type`, `account_id`, `category_id`, `amount`, `note`, `updated_at`
+- `Accounts`: `id`, `name`, `account_type`, `balance`, `is_active`
+- `Savings`: `id`, `name`, `target_amount`, `current_amount`, `linked_account_id`
+- `Categories`: `id`, `name`, `type`, `icon`, `color`
+
+Sheet yang sudah ada tidak dihapus. Baris pertama dipastikan menjadi header standar dan dibekukan.
 
 ## Deploy sebagai Web App
 
-1. Klik **Deploy → New deployment**.
-2. Pilih type **Web app**.
-3. Isi description (opsional), lalu atur:
-   - **Execute as**: `Me` (akun Anda sendiri)
-   - **Who has access**: `Anyone`
-4. Klik **Deploy**, lalu salin **Web app URL** yang muncul.
-5. Setiap kali mengubah kode, gunakan **Deploy → Manage deployments → Edit → New version** agar
-   perubahan aktif (versi lama tidak ikut berubah).
+1. Buka **Deploy > New deployment**.
+2. Pilih **Web app**.
+3. Atur **Execute as** menjadi `Me`.
+4. Atur **Who has access** menjadi `Anyone`.
+5. Klik **Deploy**.
+6. Salin URL yang berakhiran `/exec`.
 
-## Menghubungkan ke Aplikasi Personal Finance
+## Koneksi ke Aplikasi
 
-1. Buka aplikasi **Personal Finance**.
-2. Masuk ke **Setelan → Integrasi**.
-3. Tempel **Web app URL** pada kolom URL Google Spreadsheet / Database.
-4. Klik **Uji koneksi** (`sync_test`), lalu gunakan **Push** dan **Fetch** untuk sinkronisasi.
+1. Buka **Personal Finance > Pengaturan > Integrasi Google Spreadsheet**.
+2. Tempel URL Web App `/exec`.
+3. Klik **Uji Koneksi** untuk memeriksa health check endpoint.
+4. Klik **Tarik Data** untuk menjalankan `fetch` dan menggabungkan data Spreadsheet ke SQLite lokal.
+5. Klik **Kirim Data** untuk menjalankan `push` transaksi lokal yang belum tersinkronisasi ke Spreadsheet.
 
 ## Format Endpoint
 
-Base URL yang ditempel tidak boleh berisi parameter tambahan.
+| Operasi | Method | URL / Body | Fungsi |
+| --- | --- | --- | --- |
+| Health check (`sync_test`) | `GET` | `<url>` | Memeriksa endpoint aktif. |
+| Fetch (`sync_fetch`) | `GET` | `<url>?action=fetch` | Mengambil transaksi dan data master. |
+| Push (`sync_push`) | `POST` | JSON `{"action":"push","transactions":[...]}` | Mengirim transaksi baru ke sheet `Transactions`. |
 
-### GET — Health check
+Base URL tidak boleh berisi parameter tambahan.
 
-```
-GET <url>
-```
+## Memperbarui Kode
 
-Respons:
-
-```json
-{ "success": true, "message": "Database Core aktif", "sheets": ["Transactions", "Accounts", "Savings", "Categories"] }
-```
-
-### GET — Fetch data
-
-```
-GET <url>?action=fetch
-```
-
-Respons:
-
-```json
-{
-  "transactions": [...],
-  "accounts": [...],
-  "savings": [...],
-  "categories": [...]
-}
-```
-
-### POST — Push transaksi
-
-```
-POST <url>
-Content-Type: application/json
-
-{
-  "action": "push",
-  "transactions": [
-    {
-      "id": "...",
-      "date": 1700000000,
-      "type": "expense",
-      "account_id": "...",
-      "destination_account_id": "...",
-      "category_id": "...",
-      "amount": 50000,
-      "note": "...",
-      "sync_status": "pending"
-    }
-  ]
-}
-```
-
-Respons:
-
-```json
-{ "success": true, "message": "N transaksi berhasil disimpan", "pushed": N }
-```
-
-## Deploy via clasp (opsional)
-
-`clasp` memungkinkan push kode langsung dari terminal tanpa menyalin manual:
-
-1. Salin `.clasp.json.example` menjadi `.clasp.json`.
-2. Ganti `scriptId` dengan ID script Anda (dapat dilihat di **Project Settings** pada editor Apps Script).
-3. Login clasp: `clasp login`.
-4. Push kode: `clasp push`.
-
-> `.clasp.json` berisi ID pribadi dan sebaiknya tidak di-commit ke repository.
+Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambil versi baru setelah cache 5 menit kedaluwarsa. Tidak perlu menempel ulang kode loader.

@@ -1,9 +1,10 @@
 /**
+ * Kode inti diambil otomatis loader dari GitHub; jangan ditempel manual di Apps Script.
  * Menangani GET untuk health check dan pengambilan data sinkronisasi.
  * @param {GoogleAppsScript.Events.DoGet} e Event GET dari Web App.
  * @return {GoogleAppsScript.Content.TextOutput} Respons JSON.
  */
-function doGet(e) {
+function handleGet_(e) {
   // Tanpa action, kembalikan health check ringan untuk sync_test.
   var action = e && e.parameter ? e.parameter.action : '';
   if (action === 'fetch') {
@@ -22,7 +23,7 @@ function doGet(e) {
  * @param {GoogleAppsScript.Events.DoPost} e Event POST dari Web App.
  * @return {GoogleAppsScript.Content.TextOutput} Respons JSON.
  */
-function doPost(e) {
+function handlePost_(e) {
   // Tolak request tanpa body atau action agar endpoint tidak menulis data ambigu.
   if (!e || !e.postData || !e.postData.contents) {
     return json_({ success: false, message: 'Body JSON wajib diisi', pushed: 0 });
@@ -74,7 +75,7 @@ function doPost(e) {
  * Membuat empat sheet standar beserta header tebal bila belum tersedia.
  * @return {void}
  */
-function setup() {
+function runSetup_() {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   var schemas = {
     Transactions: ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'],

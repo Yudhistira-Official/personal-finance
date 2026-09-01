@@ -18,21 +18,26 @@ Database Core adalah endpoint Google Apps Script untuk sinkronisasi dua arah apl
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
 const PF_CACHE_KEY = 'pf_dbcore_v3';
-const PF_CACHE_TTL = 1000; // detik
+const PF_CACHE_TTL = 1000; // detik (~17 menit)
 
-// Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam
-// eval() (Code.gs dari GitHub) sehingga TIDAK terdeteksi analyzer scope Apps
-// Script. Baris ini memaksa scope "spreadsheets" diminta saat otorisasi,
-// tanpa itu setup()/push()/fetch() gagal dengan "permissions are not sufficient".
+// Referensi STATIS ke SpreadsheetApp agar izin OAuth diminta saat deploy/otorisasi
 function pfScopeHint_() {
-  return [SpreadsheetApp.getActiveSpreadsheet, UrlFetchApp.fetch, CacheService.getScriptCache, ContentService.createTextOutput];
+  return [
+    SpreadsheetApp.getActiveSpreadsheet,
+    UrlFetchApp.fetch,
+    CacheService.getScriptCache,
+    ContentService.createTextOutput
+  ];
 }
 
 function pfFetchCore_() {
   var cache = CacheService.getScriptCache();
   var code = cache.get(PF_CACHE_KEY);
   if (!code) {
-    var res = UrlFetchApp.fetch(PF_RAW_BASE + PF_CORE_FILE, { muteHttpExceptions: true });
+    var res = UrlFetchApp.fetch(PF_RAW_BASE + PF_CORE_FILE, {
+      muteHttpExceptions: true,
+      headers: { 'Cache-Control': 'no-cache' } // Pastikan selalu ambil commit terbaru dari GitHub
+    });
     var status = res.getResponseCode();
     if (status !== 200) {
       throw new Error('Gagal mengambil ' + PF_CORE_FILE + ' dari GitHub (HTTP ' + status + ').');
@@ -51,20 +56,35 @@ function pfJson_(obj) {
 // Titik masuk Web App — eval Code.gs lalu panggil fungsinya lewat globalThis.
 function doGet(e) {
   pfScopeHint_();
-  try { eval(pfFetchCore_()); return globalThis.handleGet_(e); }
-  catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
-}
-function doPost(e) {
-  pfScopeHint_();
-  try { eval(pfFetchCore_()); return globalThis.handlePost_(e); }
-  catch (err) { return pfJson_({ success: false, message: 'Loader: ' + err.message }); }
+  try {
+    eval(pfFetchCore_());
+    return globalThis.handleGet_(e);
+  } catch (err) {
+    return pfJson_({ success: false, message: 'Loader doGet: ' + err.message });
+  }
 }
 
-// Jalankan sekali untuk membuat sheet + header.
+function doPost(e) {
+  pfScopeHint_();
+  try {
+    eval(pfFetchCore_());
+    return globalThis.handlePost_(e);
+  } catch (err) {
+    return pfJson_({ success: false, message: 'Loader doPost: ' + err.message });
+  }
+}
+
+// Jalankan sekali untuk inisialisasi sheet + header awal
 function setup() {
   pfScopeHint_();
   eval(pfFetchCore_());
   return globalThis.runSetup_();
+}
+
+// Jalankan fungsi ini di editor Apps Script jika ingin bypass/hapus cache seketika
+function clearCache() {
+  CacheService.getScriptCache().remove(PF_CACHE_KEY);
+  Logger.log('Cache loader berhasil dihapus. Request berikutnya akan menarik script terbaru dari GitHub.');
 }
 ```
 
@@ -127,7 +147,7 @@ Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambi
 | `Gagal mengambil Code.gs dari GitHub (HTTP 404)` | URL raw salah / file belum di-push | Pastikan `database-core/Code.gs` sudah ada di branch `main` repo. |
 | Web App minta login / `401` | Akses deployment bukan "Anyone" | Deploy > Manage deployments > ubah *Who has access* ke **Anyone**. |
 | `Exception: Authorization required` saat `UrlFetchApp` | Izin eksternal belum diberikan | Jalankan `setup()` dari editor Apps Script sekali, klik **Review permissions → Allow**. |
-| Perubahan `Code.gs` belum terlihat | Cache loader (~17 menit) | Tunggu ~17 menit, atau naikkan `PF_CACHE_KEY` (mis. `pf_dbcore_v3`) untuk memaksa refresh. |
+| Perubahan `Code.gs` belum terlihat | Cache loader (~17 menit) | Tunggu ~17 menit, atau panggil `clearCache()` / naikkan `PF_CACHE_KEY` untuk memaksa refresh. |
 | `SpreadsheetApp.getActiveSpreadsheet()` null | Script tidak terikat ke spreadsheet | Buat script lewat **Extensions > Apps Script** dari dalam spreadsheet (bukan project standalone). |
 
 > Setelah mengubah loader di editor, selalu klik **Deploy > Manage deployments > Edit > New version > Deploy**. Tanpa deploy ulang, Web App masih menjalankan versi lama.

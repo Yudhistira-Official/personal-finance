@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, type Category, type SyncInfo } from "$lib/api";
+  import { checkForUpdate } from "$lib/updater";
+  import { enableAutoSync, disableAutoSync, applyAutoSync } from "$lib/autosync";
   import Icon from "$lib/components/Icon.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import IconPicker from "$lib/components/IconPicker.svelte";
@@ -27,7 +29,10 @@
   let savingCat = $state(false);
 
   let resetMsg = $state<{ ok: boolean; text: string } | null>(null);
+  let checkingUpdate = $state(false);
 
+  // Handle interval auto-sync — sekarang dihoist ke $lib/autosync.ts agar tetap hidup saat pindah halaman.
+  // Simpan URL awal agar toggle tidak menghapus nilai tersimpan bila input kosong.
   // preset color swatches for the category picker
   const presetColors = [
     "#4f8ef7",
@@ -53,7 +58,10 @@
       const [info, cats] = await Promise.all([api.sync_status(), api.categories_list()]);
       syncInfo = info;
       sheetUrl = info?.sheet_url ?? "";
+      autoSync = info.auto_sync === true;
       categories = cats;
+      // Check silently on entry; failures and no-update results stay invisible.
+      void checkForUpdate();
     } catch (e) {
       loadError = String(e);
     } finally {
@@ -63,6 +71,20 @@
 
   function flash(ok: boolean, text: string) {
     syncMsg = { ok, text };
+  }
+
+  // Toggle auto-sync: simpan ke backend lalu start/stop interval global sesuai nilai.
+  async function toggleAutoSync() {
+    const next = !autoSync;
+    const savedUrl = syncInfo?.sheet_url ?? null;
+    try {
+      if (next) await enableAutoSync(savedUrl);
+      else await disableAutoSync(savedUrl);
+      autoSync = next;
+      await refreshStatus();
+    } catch (e) {
+      flash(false, `Gagal menyimpan pengaturan: ${String(e)}`);
+    }
   }
 
   async function refreshStatus() {
@@ -116,6 +138,7 @@
     try {
       await api.settings_save(sheetUrl, autoSync);
       flash(true, "Pengaturan berhasil disimpan.");
+      applyAutoSync(autoSync);
       await refreshStatus();
     } catch (e) {
       flash(false, `Gagal menyimpan pengaturan: ${String(e)}`);
@@ -159,6 +182,24 @@
     }
   }
 
+  // Cek pembaruan manual; tampilkan hasil di feedback box (relaunch menutup app).
+  async function runUpdateCheck() {
+    if (checkingUpdate) return;
+    checkingUpdate = true;
+    try {
+      const version = await checkForUpdate();
+      if (version) {
+        flash(true, `Versi baru v${version} terpasang, aplikasi dimulai ulang…`);
+      } else {
+        flash(true, "Sudah versi terbaru.");
+      }
+    } catch {
+      flash(false, "Gagal memeriksa pembaruan.");
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
   async function resetData() {
     if (!window.confirm("Yakin ingin menghapus SEMUA data lokal? Tindakan ini tidak dapat dibatalkan.")) return;
     resetMsg = null;
@@ -171,6 +212,8 @@
       resetMsg = { ok: false, text: `Reset gagal: ${String(e)}` };
     }
   }
+
+  // Timer auto-sync kini global ($lib/autosync.ts, dikelola layout) — tidak dibersihkan saat unmount.
 </script>
 
 <div class="page">
@@ -275,7 +318,7 @@
               role="switch"
               aria-checked={autoSync}
               aria-label="Sinkronisasi Otomatis"
-              onclick={() => (autoSync = !autoSync)}
+              onclick={toggleAutoSync}
             ></button>
           </div>
 
@@ -358,10 +401,25 @@
             </div>
           </div>
 
-          <div class="divider"></div>
+           <div class="divider"></div>
 
-          <div class="row">
-            <div class="icon-tile" style="background:var(--neg-soft)">
+           <div class="row">
+             <div class="icon-tile" style="background:var(--brand-soft)">
+               <Icon name="refresh" size={22} color="var(--brand)" />
+             </div>
+             <div class="grow">
+               <p class="h-sm" style="margin:0">Pembaruan Otomatis</p>
+               <p class="text-muted" style="margin:2px 0 0;font-size:12px">Periksa versi terbaru aplikasi dari GitHub Releases.</p>
+             </div>
+             <button class="btn btn-secondary btn-sm" onclick={runUpdateCheck} disabled={checkingUpdate}>
+               <Icon name="refresh" size={15} /> {checkingUpdate ? "Memeriksa…" : "Cek Pembaruan"}
+             </button>
+           </div>
+
+           <div class="divider"></div>
+
+           <div class="row">
+             <div class="icon-tile" style="background:var(--neg-soft)">
               <Icon name="alert" size={22} color="var(--neg)" />
             </div>
             <div class="grow">

@@ -1,17 +1,21 @@
 # Personal Finance
 
-Aplikasi keuangan pribadi **offline-first** untuk desktop dan mobile — pencatatan arus kas, pemantauan saldo lintas bank/e-wallet, dan alokasi pos tabungan (*envelope budgeting*), dengan sinkronisasi opsional ke Google Spreadsheet.
+<p align="center">
+  <img src="Icon.svg" alt="Logo Personal Finance" width="96" height="96" />
+</p>
+
+Aplikasi keuangan pribadi **offline-first** untuk desktop dan mobile: pencatatan arus kas, pemantauan saldo lintas bank/e-wallet, serta alokasi pos tabungan (*envelope budgeting*), dengan sinkronisasi opsional ke Google Spreadsheet.
 
 ## Fitur Utama
 
-- **Multi-akun** — Bank, E-Wallet, Cash, Investasi (BNI, BCA, GoPay, Dana, dll.)
-- **Transaksi** — pemasukan, pengeluaran, dan transfer antar-akun (transfer tidak dihitung sebagai arus kas)
-- **Pos tabungan** — target nominal, progres, dan kalkulator estimasi setor per minggu
-- **Dashboard** — net worth, cashflow bulanan, donut pengeluaran per kategori
-- **Riwayat** — filter rentang/akun/kategori/tipe, pencarian, ekspor CSV
-- **Sinkronisasi dua arah** ke Google Spreadsheet (fetch & push)
-- **Offline-first** — semua data tersimpan di SQLite lokal; sync berjalan di latar belakang
-- **Presisi uang** — nominal disimpan sebagai `i64` (Rupiah), bebas error floating point
+- **Multi-akun** — Bank, E-Wallet, Cash, Investasi.
+- **Transaksi** — pemasukan, pengeluaran, serta transfer antar-akun.
+- **Pos tabungan** — target nominal, progres, dan estimasi setor mingguan.
+- **Dashboard** — net worth, cashflow bulanan, serta pengeluaran per kategori.
+- **Riwayat** — filter, pencarian, dan ekspor CSV.
+- **Sinkronisasi dua arah** ke Google Spreadsheet.
+- **Offline-first** — data tersimpan di SQLite lokal dan sinkronisasi berjalan di latar belakang.
+- **Presisi uang** — nominal tersimpan sebagai `i64` Rupiah.
 
 ## Tech Stack
 
@@ -30,7 +34,7 @@ src-tauri/      # Rust core: model, SQLite, IPC commands, sync engine
 database-core/  # Backend Google Apps Script (endpoint sync)
 ```
 
-## Menjalankan Aplikasi
+## Tutorial Install
 
 ### Prasyarat
 
@@ -50,38 +54,42 @@ npm run tauri dev
 npm run tauri build
 ```
 
-### Build Android (APK)
+### Build Android
 
 ```bash
 npm run tauri android init
 npm run tauri android build -- --apk --target aarch64
 ```
 
-## Rilis & APK
+## Tutorial Menggunakan
 
-APK rilis tersedia di halaman [Releases](https://github.com/Yudhistira-Official/personal-finance/releases). Versi **v0.1.0** berisi APK Android (arm64-v8a) yang sudah **ditandatangani** — siap dipasang langsung via *sideload* (aktifkan "Install unknown apps").
+- **Dashboard** — lihat net worth, cashflow bulanan, dan ringkasan pengeluaran.
+- **Riwayat** — cari, filter, dan ekspor transaksi.
+- **Tabungan** — buat pos tabungan, tetapkan target, dan pantau progres.
+- **Dompet** — kelola akun bank, e-wallet, cash, serta investasi.
+- **Setelan** — atur preferensi, integrasi Google Spreadsheet, dan sinkronisasi.
+- **Pengaturan → Cek Pembaruan** — update otomatis dari GitHub.
 
----
+## Tutorial Setup Database Core
 
-# Tutorial: Database Core (Sinkronisasi Google Spreadsheet)
+Database Core adalah **endpoint Google Apps Script** yang menjadi database awan untuk sinkronisasi dua arah. Kode inti (`Code.gs`) diambil otomatis dari GitHub melalui loader.
 
-Database Core adalah **endpoint Google Apps Script** yang menjadi "database" awan untuk sinkronisasi dua arah. Kode intinya (`Code.gs`) diambil otomatis dari GitHub lewat **loader** kecil, jadi kamu tidak perlu copy-paste kode besar dan selalu mendapat versi terbaru.
-
-## 1. Pasang Loader
+### 1. Pasang Loader
 
 1. Buat spreadsheet baru di [Google Sheets](https://sheets.google.com).
 2. Buka **Extensions > Apps Script**.
-3. Hapus isi editor, lalu tempel **kode loader** berikut:
+3. Hapus isi editor, lalu tempel kode loader berikut:
 
 ```javascript
 /**
  * Personal Finance — Database Core (LOADER)
- * Kode inti (Code.gs) diambil otomatis dari GitHub.
+ * Tempel kode ini di editor Google Apps Script. Kode inti (Code.gs) diambil
+ * otomatis dari GitHub, jadi tidak perlu copy-paste manual dan selalu terbaru.
  */
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
 const PF_CACHE_KEY = 'pf_dbcore_v3';
-const PF_CACHE_TTL = 300; // detik
+const PF_CACHE_TTL = 1000; // detik
 
 // Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam
 // eval() (Code.gs dari GitHub) sehingga TIDAK terdeteksi analyzer scope Apps
@@ -133,40 +141,21 @@ function setup() {
 
 4. Klik **Simpan** (Ctrl+S).
 
-## 2. Jalankan `setup()` (sekali)
+### 2. Jalankan `setup()`
 
-1. Pilih fungsi **`setup`** pada dropdown di toolbar.
-2. Klik **Run** (▶).
-3. Saat diminta izin, klik **Review permissions → Allow** (butuh akses internet untuk `UrlFetchApp`).
+Pilih fungsi **`setup`** di toolbar, klik **Run** (▶), lalu setujui **Review permissions → Allow**. Fungsi ini membuat sheet `Transactions`, `Accounts`, `Savings`, dan `Categories` beserta header standarnya.
 
-`setup()` membuat 4 sheet dengan header standar (baris pertama dibekukan):
+### 3. Deploy
 
-| Sheet | Kolom |
-| --- | --- |
-| `Transactions` | id, date, type, account_id, category_id, amount, note, updated_at |
-| `Accounts` | id, name, account_type, balance, is_active |
-| `Savings` | id, name, target_amount, current_amount, linked_account_id |
-| `Categories` | id, name, type, icon, color |
+Buka **Deploy > New deployment**, pilih **Web app**, atur **Execute as: Me** dan **Who has access: Anyone**, lalu klik **Deploy**. Salin URL yang berakhiran `/exec`.
 
-## 3. Deploy sebagai Web App
+### 4. Hubungkan ke Aplikasi
 
-1. **Deploy > New deployment** → pilih **Web app**.
-2. **Execute as**: `Me`.
-3. **Who has access**: `Anyone`.
-4. Klik **Deploy**, lalu **salin URL** yang berakhiran `/exec`.
+Buka **Personal Finance > Pengaturan > Integrasi Google Spreadsheet**, tempel URL `/exec`, lalu pilih **Uji Koneksi**. Gunakan **Kirim Data** untuk push dan **Tarik Data** untuk fetch; **Auto-Sync** bersifat opsional.
 
-## 4. Hubungkan ke Aplikasi
+### Alur Data
 
-1. Buka **Personal Finance > Pengaturan > Integrasi Google Spreadsheet**.
-2. Tempel URL `/exec` tadi.
-3. **Uji Koneksi** → pastikan health check OK.
-4. **Kirim Data** (`push`) → unggah transaksi lokal ke Sheets.
-5. **Tarik Data** (`fetch`) → ambil data dari Sheets ke aplikasi.
-6. (Opsional) aktifkan **Auto-Sync**.
-
-## Alur Data
-
-```
+```text
 [Catat transaksi di UI]
         │  Tauri IPC
         ▼
@@ -178,10 +167,10 @@ function setup() {
 [Google Spreadsheet milikmu]
 ```
 
-- **Push**: transaksi berstatus `pending`/`failed` dikirim; idempoten berdasarkan `id`.
-- **Fetch**: data dari Sheets digabung ke SQLite lokal via `INSERT OR IGNORE` (baris `synced` tidak diduplikasi).
+- **Push** mengirim transaksi berstatus `pending`/`failed` secara idempoten berdasarkan `id`.
+- **Fetch** menggabungkan data Sheets ke SQLite lokal tanpa duplikasi.
 
-## Endpoint
+### Endpoint
 
 | Operasi | Method | URL / Body |
 | --- | --- | --- |
@@ -189,11 +178,9 @@ function setup() {
 | Fetch | `GET` | `<url>?action=fetch` |
 | Push | `POST` | `{"action":"push","transactions":[...]}` |
 
-## Memperbarui Kode
+### Memperbarui Kode
 
-Ubah `database-core/Code.gs` lalu push ke GitHub. Loader mengambil versi baru otomatis setelah cache 5 menit kedaluwarsa (atau naikkan `PF_CACHE_KEY` untuk memaksa refresh). **Tidak perlu menempel ulang loader.**
-
-> Troubleshooting lengkap (error `handleGet_ is not defined`, HTTP 404, izin akses, dsb.) ada di [`database-core/README.md`](database-core/README.md).
+Ubah `database-core/Code.gs`, lalu push ke GitHub. Loader mengambil versi baru otomatis setelah cache ~17 menit (1000 detik) kedaluwarsa. Naikkan `PF_CACHE_KEY` untuk memaksa refresh. Tidak perlu menempel ulang loader.
 
 ## Catatan Privasi
 

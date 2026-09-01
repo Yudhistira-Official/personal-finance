@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { page } from "$app/stores";
   import "../app.css";
   import Icon from "$lib/components/Icon.svelte";
+  import { initAutoSync } from "$lib/autosync";
 
   const tabs = [
     { id: "riwayat", label: "Riwayat", path: "/riwayat", icon: "clock" },
@@ -12,6 +14,10 @@
   ];
   $: current = $page.url.pathname;
   $: isActive = (p: string) => (p === "/" ? current === "/" : current.startsWith(p));
+
+  onMount(() => {
+    void initAutoSync();
+  });
 </script>
 
 <div class="app-root">

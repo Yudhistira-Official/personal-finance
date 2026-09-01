@@ -11,6 +11,10 @@ use db::AppState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Auto-update: updater fetches latest.json from GitHub Releases;
+        // process plugin supplies relaunch() after install.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let state = AppState::new(&app.handle())?;
             app.manage(state);

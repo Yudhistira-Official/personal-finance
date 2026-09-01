@@ -227,4 +227,5 @@ pub struct SyncInfo {
     pub status: String,
     pub pending_count: u32,
     pub sheet_url: Option<String>,
+    pub auto_sync: bool,
 }

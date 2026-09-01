@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Squircle Gradient (Midnight to Deep Blue) -->
+    <linearGradient id="bgFlatBlue" x1="128" y1="128" x2="896" y2="896" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1E3A8A" />
+      <stop offset="60%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+
+    <!-- Subtle Inner Border -->
+    <linearGradient id="flatBorder" x1="128" y1="128" x2="896" y2="896" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#1D4ED8" stop-opacity="0.1" />
+    </linearGradient>
+
+    <!-- Pillar 1: Accounts & Wallets -->
+    <linearGradient id="pillarBlue1" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#1D4ED8" />
+      <stop offset="100%" stop-color="#3B82F6" />
+    </linearGradient>
+
+    <!-- Pillar 2: Cashflow & Transactions -->
+    <linearGradient id="pillarBlue2" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="100%" stop-color="#38BDF8" />
+    </linearGradient>
+
+    <!-- Pillar 3: Savings Pockets -->
+    <linearGradient id="pillarBlue3" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#0369A1" />
+      <stop offset="100%" stop-color="#7DD3FC" />
+    </linearGradient>
+
+    <!-- Trendline Arc Gradient -->
+    <linearGradient id="trendBlue" x1="250" y1="620" x2="720" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1E40AF" />
+      <stop offset="50%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#E0F2FE" />
+    </linearGradient>
+
+    <!-- Target Node Gradient -->
+    <linearGradient id="nodeBlue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#BAE6FD" />
+      <stop offset="100%" stop-color="#0284C7" />
+    </linearGradient>
+
+    <!-- Overlay Mask for Corner Safety -->
+    <clipPath id="squircleClip">
+      <rect x="128" y="128" width="768" height="768" rx="176" ry="176" />
+    </clipPath>
+  </defs>
+
+  <!-- ================= CANVAS BASE (1024x1024) ================= -->
+
+  <!-- App Icon Squircle Container (768x768, strictly 128px margin) -->
+  <rect x="128" y="128" width="768" height="768" rx="176" ry="176" fill="url(#bgFlatBlue)" />
+  <rect x="128" y="128" width="768" height="768" rx="176" ry="176" fill="none" stroke="url(#flatBorder)" stroke-width="4" />
+
+  <!-- Flat Content Layer -->
+  <g clip-path="url(#squircleClip)">
+    <!-- Flat Ambient Geometry (Subtle Diagonal Slice) -->
+    <path d="M 128 350 L 600 128 L 896 128 L 896 550 Z" fill="#1E40AF" opacity="0.08" />
+
+    <!-- Baseline Platform -->
+    <rect x="280" y="684" width="464" height="14" rx="7" fill="#1E293B" opacity="0.7" />
+
+    <!-- 1. Left Pillar (Dompet & Akun) -->
+    <rect x="312" y="510" width="92" height="174" rx="30" fill="url(#pillarBlue1)" />
+
+    <!-- 2. Center Pillar (Riwayat & Mutasi) -->
+    <rect x="436" y="410" width="92" height="274" rx="30" fill="url(#pillarBlue2)" />
+
+    <!-- 3. Right Pillar (Tabungan & Pertumbuhan) -->
+    <rect x="560" y="310" width="92" height="374" rx="30" fill="url(#pillarBlue3)" />
+
+    <!-- Dynamic Growth Curve (Flat Ribbon) -->
+    <path d="M 264 620 C 364 595 420 480 500 420 C 576 365 628 260 708 260"
+          fill="none"
+          stroke="url(#trendBlue)"
+          stroke-width="24"
+          stroke-linecap="round" />
+
+    <!-- High-Contrast Core Accent Line -->
+    <path d="M 264 620 C 364 595 420 480 500 420 C 576 365 628 260 708 260"
+          fill="none"
+          stroke="#FFFFFF"
+          stroke-width="6"
+          stroke-linecap="round"
+          opacity="0.8" />
+
+    <!-- Flat Target Pin / Node -->
+    <circle cx="708" cy="260" r="28" fill="#0C4A6E" />
+    <circle cx="708" cy="260" r="20" fill="url(#nodeBlue)" />
+    <circle cx="708" cy="260" r="8" fill="#FFFFFF" />
+  </g>
+</svg>

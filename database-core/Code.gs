@@ -40,18 +40,23 @@ function handlePost_(e) {
       return json_({ success: false, message: 'Sheet Transactions belum dibuat', pushed: 0 });
     }
 
-    var existingIds = readSheet_('Transactions').reduce(function(ids, row) {
-      if (row.id) ids[row.id] = true;
-      return ids;
-    }, {});
+    // Petakan id → nomor baris fisik (1-indexed) agar baris lama bisa di-update.
+    var headers = ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'];
+    var idToRow = {};
+    var values = sheet.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      var existingId = String(values[i][0] || '').trim();
+      if (existingId) idToRow[existingId] = i + 1;
+    }
+
     var pushed = 0;
 
-    // Simpan hanya transaksi valid baru; ID menjadi kunci idempotensi push.
+    // UPSERT: update baris bila id sudah ada, sebaliknya append baris baru.
     payload.transactions.forEach(function(transaction) {
       var id = String(transaction.id || '').trim();
-      if (!id || existingIds[id]) return;
+      if (!id) return;
 
-      appendRow_('Transactions', [
+      var row = [
         id,
         transaction.date || 0,
         transaction.type || 'expense',
@@ -60,8 +65,14 @@ function handlePost_(e) {
         transaction.amount || 0,
         String(transaction.note || ''),
         new Date().toISOString()
-      ]);
-      existingIds[id] = true;
+      ];
+
+      if (idToRow[id]) {
+        sheet.getRange(idToRow[id], 1, 1, headers.length).setValues([row]);
+      } else {
+        appendRow_('Transactions', row);
+        idToRow[id] = sheet.getLastRow();
+      }
       pushed++;
     });
 

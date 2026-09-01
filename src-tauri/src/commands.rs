@@ -529,10 +529,12 @@ pub fn sync_status(state: State<AppState>) -> Result<SyncInfo, String> {
     } else {
         "pending".to_string()
     };
+    let auto = *state.auto_sync.lock().map_err(|e| e.to_string())?;
     Ok(SyncInfo {
         status,
         pending_count: pending,
         sheet_url: url,
+        auto_sync: auto,
     })
 }
 

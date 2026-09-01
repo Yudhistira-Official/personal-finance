@@ -67,6 +67,7 @@ export interface SyncInfo {
   status: string;
   pending_count: number;
   sheet_url: string | null;
+  auto_sync: boolean;
 }
 
 export const api = {

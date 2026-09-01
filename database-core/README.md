@@ -18,7 +18,7 @@ Database Core adalah endpoint Google Apps Script untuk sinkronisasi dua arah apl
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
 const PF_CACHE_KEY = 'pf_dbcore_v3';
-const PF_CACHE_TTL = 300; // detik
+const PF_CACHE_TTL = 1000; // detik
 
 // Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam
 // eval() (Code.gs dari GitHub) sehingga TIDAK terdeteksi analyzer scope Apps
@@ -116,7 +116,7 @@ Base URL tidak boleh berisi parameter tambahan.
 
 ## Memperbarui Kode
 
-Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambil versi baru setelah cache 5 menit kedaluwarsa. Tidak perlu menempel ulang kode loader.
+Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambil versi baru setelah cache ~17 menit (1000 detik) kedaluwarsa. Tidak perlu menempel ulang kode loader.
 
 ## Troubleshooting
 
@@ -127,7 +127,7 @@ Cukup push perubahan `database-core/Code.gs` ke GitHub. Loader otomatis mengambi
 | `Gagal mengambil Code.gs dari GitHub (HTTP 404)` | URL raw salah / file belum di-push | Pastikan `database-core/Code.gs` sudah ada di branch `main` repo. |
 | Web App minta login / `401` | Akses deployment bukan "Anyone" | Deploy > Manage deployments > ubah *Who has access* ke **Anyone**. |
 | `Exception: Authorization required` saat `UrlFetchApp` | Izin eksternal belum diberikan | Jalankan `setup()` dari editor Apps Script sekali, klik **Review permissions → Allow**. |
-| Perubahan `Code.gs` belum terlihat | Cache loader 5 menit | Tunggu ~5 menit, atau naikkan `PF_CACHE_KEY` (mis. `pf_dbcore_v2`) untuk memaksa refresh. |
+| Perubahan `Code.gs` belum terlihat | Cache loader (~17 menit) | Tunggu ~17 menit, atau naikkan `PF_CACHE_KEY` (mis. `pf_dbcore_v3`) untuk memaksa refresh. |
 | `SpreadsheetApp.getActiveSpreadsheet()` null | Script tidak terikat ke spreadsheet | Buat script lewat **Extensions > Apps Script** dari dalam spreadsheet (bukan project standalone). |
 
 > Setelah mengubah loader di editor, selalu klik **Deploy > Manage deployments > Edit > New version > Deploy**. Tanpa deploy ulang, Web App masih menjalankan versi lama.

@@ -1,102 +1,138 @@
 /**
- * Kode inti diambil otomatis loader dari GitHub; jangan ditempel manual di Apps Script.
- * Menangani GET untuk health check dan pengambilan data sinkronisasi.
- * @param {GoogleAppsScript.Events.DoGet} e Event GET dari Web App.
- * @return {GoogleAppsScript.Content.TextOutput} Respons JSON.
+ * PERSONAL FINANCE - CORE ENGINE (Optimized)
+ * Dijalankan via Bootstrapper Loader dari GitHub.
+ */
+
+var SCHEMAS = {
+  Transactions: ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'],
+  Accounts: ['id', 'name', 'account_type', 'balance', 'is_active'],
+  Savings: ['id', 'name', 'target_amount', 'current_amount', 'linked_account_id'],
+  Categories: ['id', 'name', 'type', 'icon', 'color']
+};
+
+/**
+ * Menangani GET untuk health check dan pengambilan data
  */
 function handleGet_(e) {
-  // Tanpa action, kembalikan health check ringan untuk sync_test.
-  var action = e && e.parameter ? e.parameter.action : '';
-  if (action === 'fetch') {
-    return json_(buildFetchPayload_());
-  }
+  try {
+    ensureSetup_();
+    var action = e && e.parameter ? e.parameter.action : '';
+    
+    if (action === 'fetch') {
+      return json_({
+        success: true,
+        message: 'Data berhasil diambil',
+        data: buildFetchPayload_()
+      });
+    }
 
-  return json_({
-    success: true,
-    message: 'Database Core aktif',
-    sheets: ['Transactions', 'Accounts', 'Savings', 'Categories']
-  });
+    return json_({
+      success: true,
+      message: 'Database Core aktif',
+      sheets: Object.keys(SCHEMAS)
+    });
+  } catch (error) {
+    return json_({ success: false, message: 'GET Error: ' + error.message });
+  }
 }
 
 /**
- * Menangani POST push transaksi dari aplikasi desktop.
- * @param {GoogleAppsScript.Events.DoPost} e Event POST dari Web App.
- * @return {GoogleAppsScript.Content.TextOutput} Respons JSON.
+ * Menangani POST untuk push transaksi cepat maupun full sync (Accounts, Savings, Categories)
  */
 function handlePost_(e) {
-  // Tolak request tanpa body atau action agar endpoint tidak menulis data ambigu.
   if (!e || !e.postData || !e.postData.contents) {
     return json_({ success: false, message: 'Body JSON wajib diisi', pushed: 0 });
   }
 
   try {
+    ensureSetup_();
     var payload = JSON.parse(e.postData.contents);
-    if (payload.action !== 'push' || !Array.isArray(payload.transactions)) {
-      return json_({ success: false, message: 'Action push dan transactions wajib diisi', pushed: 0 });
+    var action = payload.action || 'push';
+
+    // 1. Action PUSH: Penambahan transaksi baru secara batch (High Performance)
+    if (action === 'push') {
+      if (!Array.isArray(payload.transactions)) {
+        return json_({ success: false, message: 'Field transactions harus berupa array', pushed: 0 });
+      }
+
+      var sheet = getSs_().getSheetByName('Transactions');
+      var existingIds = readSheet_('Transactions').reduce(function(ids, row) {
+        if (row.id) ids[String(row.id)] = true;
+        return ids;
+      }, {});
+
+      var newRows = [];
+      var nowIso = new Date().toISOString();
+
+      payload.transactions.forEach(function(tx) {
+        var id = String(tx.id || '').trim();
+        if (!id || existingIds[id]) return;
+
+        newRows.push([
+          id,
+          tx.date || 0,
+          tx.type || 'expense',
+          String(tx.account_id || ''),
+          String(tx.category_id || ''),
+          tx.amount || 0,
+          String(tx.note || ''),
+          nowIso
+        ]);
+        existingIds[id] = true;
+      });
+
+      // Tulis seluruh baris sekaligus dalam satu operasi I/O
+      if (newRows.length > 0) {
+        var startRow = sheet.getLastRow() + 1;
+        sheet.getRange(startRow, 1, newRows.length, SCHEMAS.Transactions.length).setValues(newRows);
+      }
+
+      return json_({
+        success: true,
+        message: newRows.length + ' transaksi baru berhasil disimpan',
+        pushed: newRows.length
+      });
     }
 
-    var sheet = getSs_().getSheetByName('Transactions');
-    if (!sheet) {
-      return json_({ success: false, message: 'Sheet Transactions belum dibuat', pushed: 0 });
+    // 2. Action SYNC_ALL: Menimpa / sinkronisasi penuh seluruh data lokal ke cloud
+    if (action === 'syncAll') {
+      var data = payload.data || {};
+      if (data.transactions) overwriteSheet_('Transactions', data.transactions);
+      if (data.accounts) overwriteSheet_('Accounts', data.accounts);
+      if (data.savings) overwriteSheet_('Savings', data.savings);
+      if (data.categories) overwriteSheet_('Categories', data.categories);
+
+      return json_({
+        success: true,
+        message: 'Full sync berhasil disinkronkan ke Spreadsheet',
+        synced_at: new Date().toISOString()
+      });
     }
 
-    var existingIds = readSheet_('Transactions').reduce(function(ids, row) {
-      if (row.id) ids[row.id] = true;
-      return ids;
-    }, {});
-    var pushed = 0;
-
-    // Simpan hanya transaksi valid baru; ID menjadi kunci idempotensi push.
-    payload.transactions.forEach(function(transaction) {
-      var id = String(transaction.id || '').trim();
-      if (!id || existingIds[id]) return;
-
-      appendRow_('Transactions', [
-        id,
-        transaction.date || 0,
-        transaction.type || 'expense',
-        String(transaction.account_id || ''),
-        String(transaction.category_id || ''),
-        transaction.amount || 0,
-        String(transaction.note || ''),
-        new Date().toISOString()
-      ]);
-      existingIds[id] = true;
-      pushed++;
-    });
-
-    return json_({ success: true, message: pushed + ' transaksi berhasil disimpan', pushed: pushed });
+    return json_({ success: false, message: 'Action tidak dikenali: ' + action });
   } catch (error) {
-    return json_({ success: false, message: 'JSON tidak valid: ' + error.message, pushed: 0 });
+    return json_({ success: false, message: 'POST Error: ' + error.message });
   }
 }
 
 /**
- * Membuat empat sheet standar beserta header tebal bila belum tersedia.
- * @return {void}
+ * Memastikan semua sheet dan header tersedia
  */
-function runSetup_() {
+function ensureSetup_() {
   var spreadsheet = getSs_();
-  var schemas = {
-    Transactions: ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'],
-    Accounts: ['id', 'name', 'account_type', 'balance', 'is_active'],
-    Savings: ['id', 'name', 'target_amount', 'current_amount', 'linked_account_id'],
-    Categories: ['id', 'name', 'type', 'icon', 'color']
-  };
-
-  // Buat sheet yang hilang, lalu pastikan baris pertama selalu menjadi header standar.
-  Object.keys(schemas).forEach(function(name) {
-    var sheet = spreadsheet.getSheetByName(name) || spreadsheet.insertSheet(name);
-    var headers = schemas[name];
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-    sheet.setFrozenRows(1);
+  Object.keys(SCHEMAS).forEach(function(name) {
+    var sheet = spreadsheet.getSheetByName(name);
+    if (!sheet) {
+      sheet = spreadsheet.insertSheet(name);
+      var headers = SCHEMAS[name];
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    }
   });
 }
 
 /**
- * Membaca sheet menjadi array object berdasarkan header baris pertama.
- * @param {string} sheetName Nama sheet yang dibaca.
- * @return {Object[]} Baris data sebagai object.
+ * Membaca sheet menjadi array of object
  */
 function readSheet_(sheetName) {
   var sheet = getSs_().getSheetByName(sheetName);
@@ -104,8 +140,9 @@ function readSheet_(sheetName) {
 
   var values = sheet.getDataRange().getValues();
   var headers = values.shift().map(String);
+  
   return values.filter(function(row) {
-    return row.some(function(value) { return value !== ''; });
+    return row.some(function(val) { return val !== ''; });
   }).map(function(row) {
     return headers.reduce(function(item, header, index) {
       item[header] = row[index];
@@ -115,20 +152,29 @@ function readSheet_(sheetName) {
 }
 
 /**
- * Menambahkan satu baris ke sheet berdasarkan nama sheet dan urutan kolomnya.
- * @param {string} sheetName Nama sheet tujuan.
- * @param {Array} values Nilai kolom sesuai header sheet.
- * @return {void}
+ * Menimpa isi sheet secara batch untuk Full Sync
  */
-function appendRow_(sheetName, values) {
+function overwriteSheet_(sheetName, items) {
   var sheet = getSs_().getSheetByName(sheetName);
-  if (!sheet) throw new Error('Sheet ' + sheetName + ' belum dibuat');
-  sheet.appendRow(values);
+  var headers = SCHEMAS[sheetName];
+  
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+
+  if (!items || items.length === 0) return;
+
+  var rows = items.map(function(item) {
+    return headers.map(function(h) {
+      return item[h] !== undefined ? item[h] : '';
+    });
+  });
+
+  sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
 }
 
 /**
- * Menggabungkan seluruh data sheet untuk respons fetch.
- * @return {Object} Payload transaksi dan master data.
+ * Mengumpulkan seluruh tabel untuk respons fetch
  */
 function buildFetchPayload_() {
   return {
@@ -140,9 +186,7 @@ function buildFetchPayload_() {
 }
 
 /**
- * Mengubah object menjadi output JSON ContentService.
- * @param {Object} payload Data yang dikirim ke client.
- * @return {GoogleAppsScript.Content.TextOutput} Output JSON UTF-8.
+ * Helper pembungkus output JSON
  */
 function json_(payload) {
   return ContentService
@@ -151,26 +195,19 @@ function json_(payload) {
 }
 
 /**
- * Ambil spreadsheet aktif dengan pesan error yang jelas.
- * getActiveSpreadsheet() mengembalikan null bila script dibuat standalone
- * (bukan lewat Extensions > Apps Script di dalam spreadsheet).
- * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
+ * Ambil instance Spreadsheet aktif
  */
 function getSs_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) {
-    throw new Error('Script tidak terikat ke spreadsheet. Buka Google Sheet > Extensions > Apps Script, bukan project standalone.');
+    throw new Error('Script tidak terikat ke spreadsheet. Pastikan dibuka melalui Extensions > Apps Script.');
   }
   return ss;
 }
 
 /**
- * Ekspos fungsi ke globalThis. Loader memanggil fungsi ini lewat globalThis
- * setelah eval(), sehingga tetap bekerja walau Apps Script V8 menjalankan kode
- * dalam mode strict (function declaration hasil eval tidak selalu bocor ke
- * scope fungsi pemanggil). Tanpa blok ini, loader bisa gagal dengan
- * "handleGet_ is not defined".
+ * Ekspos fungsi ke globalThis untuk V8 runtime compatibility
  */
 globalThis.handleGet_ = handleGet_;
 globalThis.handlePost_ = handlePost_;
-globalThis.runSetup_ = runSetup_;
+globalThis.runSetup_ = ensureSetup_;

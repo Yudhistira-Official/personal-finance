@@ -1,7 +1,7 @@
 name: Release Mobile (Android + iOS)
 
-# Build Android APK (signed) and iOS app on version tags (v*).
-# Desktop builds are handled by release.yml (manual dispatch).
+# Build a SIGNED Android APK and (best-effort) iOS app on version tags (v*).
+# Desktop builds were removed — this repository ships mobile only.
 on:
   push:
     tags:
@@ -53,28 +53,35 @@ jobs:
           NDK_DIR=$(ls -d "$ANDROID_HOME/ndk/"* | sort -V | tail -1)
           echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
 
-      - name: Write keystore.properties (signed release APK)
+      - name: Setup Android signing (keystore + properties)
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then echo "ANDROID_KEYSTORE_BASE64 secret belum di-set — APK unsigned"; exit 0; fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          if [ -z "$ANDROID_KEY_BASE64" ]; then
+            echo "ANDROID_KEY_BASE64 secret is not set — building UNSIGNED APK."
+            exit 0
+          fi
+          echo "$ANDROID_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           {
+            echo "password=$ANDROID_KEY_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
             echo "storeFile=$RUNNER_TEMP/release.keystore"
-            echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEYSTORE_PASSWORD"
           } > src-tauri/gen/android/keystore.properties
+          # Inject signingConfigs into the Tauri-generated Gradle file.
+          bash .github/android-signing-patch.sh
 
-      - name: Build APK (arm64-v8a)
+      - name: Build APK (arm64-v8a, signed)
         run: npx tauri android build --apk --target aarch64
 
       - name: Collect APK
         id: collect
         run: |
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release*.apk" | head -1)
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release*.apk" | head -1)
+          fi
           echo "path=$APK" >> "$GITHUB_OUTPUT"
           echo "built: $APK"
 
@@ -83,7 +90,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Personal Finance ${{ github.ref_name }}"
-          draft: true
+          draft: false
           files: ${{ steps.collect.outputs.path }}
 
   ios:
@@ -114,6 +121,8 @@ jobs:
       - name: Init iOS project
         run: npx tauri ios init
 
+      # iOS requires Apple Developer signing to produce an installable .ipa.
+      # Without certs this step fails gracefully; Android release still ships.
       - name: Build iOS (unsigned device archive)
         run: npx tauri ios build --target aarch64-apple-ios --no-sign
         continue-on-error: true
@@ -124,7 +133,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Personal Finance ${{ github.ref_name }}"
-          draft: true
+          draft: false
           files: |
             src-tauri/gen/apple/build/**/*.ipa
             src-tauri/gen/apple/build/**/*.xcarchive

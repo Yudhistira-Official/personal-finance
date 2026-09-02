@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, type Category, type SyncInfo } from "$lib/api";
-  import { checkForUpdate } from "$lib/updater";
+  import { checkForUpdate, type UpdateInfo } from "$lib/updater";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { enableAutoSync, disableAutoSync, applyAutoSync } from "$lib/autosync";
   import Icon from "$lib/components/Icon.svelte";
   import Modal from "$lib/components/Modal.svelte";
@@ -30,6 +31,9 @@
 
   let resetMsg = $state<{ ok: boolean; text: string } | null>(null);
   let checkingUpdate = $state(false);
+  // Hasil cek versi cross-platform (GitHub Releases); null sampai cek pertama selesai.
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let updateMsg = $state<{ ok: boolean; text: string } | null>(null);
 
   // Handle interval auto-sync — sekarang dihoist ke $lib/autosync.ts agar tetap hidup saat pindah halaman.
   // Simpan URL awal agar toggle tidak menghapus nilai tersimpan bila input kosong.
@@ -60,8 +64,8 @@
       sheetUrl = info?.sheet_url ?? "";
       autoSync = info.auto_sync === true;
       categories = cats;
-      // Check silently on entry; failures and no-update results stay invisible.
-      void checkForUpdate();
+      // Check silently on entry; retain result for version status row.
+      void checkForUpdate().then((info) => (updateInfo = info));
     } catch (e) {
       loadError = String(e);
     } finally {
@@ -182,21 +186,37 @@
     }
   }
 
-  // Cek pembaruan manual; tampilkan hasil di feedback box (relaunch menutup app).
+  // Cek pembaruan manual via GitHub Releases (cross-platform, termasuk Android).
+  // Tidak auto-install: user diarahkan ke halaman rilis lewat browser.
   async function runUpdateCheck() {
     if (checkingUpdate) return;
     checkingUpdate = true;
+    updateMsg = null;
     try {
-      const version = await checkForUpdate();
-      if (version) {
-        flash(true, `Versi baru v${version} terpasang, aplikasi dimulai ulang…`);
+      const info = await checkForUpdate();
+      updateInfo = info;
+      if (info.updateAvailable) {
+        updateMsg = { ok: true, text: `Versi terbaru v${info.latest} tersedia. Kamu pakai v${info.current}.` };
+      } else if (info.url === "") {
+        // url kosong = fetch/API gagal (updater gagal senyap, bukan "sudah terbaru").
+        updateMsg = { ok: false, text: "Gagal memeriksa pembaruan. Cek koneksi internet." };
       } else {
-        flash(true, "Sudah versi terbaru.");
+        updateMsg = { ok: true, text: `Sudah versi terbaru (v${info.current}).` };
       }
     } catch {
-      flash(false, "Gagal memeriksa pembaruan.");
+      updateMsg = { ok: false, text: "Gagal memeriksa pembaruan." };
     } finally {
       checkingUpdate = false;
+    }
+  }
+
+  // Buka halaman rilis di browser agar user bisa mengunduh versi terbaru.
+  async function openReleasePage() {
+    if (!updateInfo?.url) return;
+    try {
+      await openUrl(updateInfo.url);
+    } catch {
+      updateMsg = { ok: false, text: "Gagal membuka halaman unduhan." };
     }
   }
 
@@ -323,15 +343,15 @@
           </div>
 
           <!-- feedback -->
-          {#if syncMsg}
-            <div
-              class="row"
-              style="padding:10px 12px;border-radius:12px;gap:8px;font-size:13px;font-weight:600;background:{syncMsg.ok ? 'var(--pos-soft)' : 'var(--neg-soft)'};color:{syncMsg.ok ? 'var(--pos-ink)' : 'var(--neg-ink)'}"
-            >
-              <Icon name={syncMsg.ok ? "check" : "alert"} size={16} />
-              <span class="grow">{syncMsg.text}</span>
-            </div>
-          {/if}
+            {#if syncMsg}
+              <div
+                class="row"
+                style="padding:10px 12px;border-radius:12px;gap:8px;font-size:13px;font-weight:600;background:{syncMsg.ok ? 'var(--pos-soft)' : 'var(--neg-soft)'};color:{syncMsg.ok ? 'var(--pos-ink)' : 'var(--neg-ink)'}"
+              >
+                <Icon name={syncMsg.ok ? "check" : "alert"} size={16} />
+                <span class="grow">{syncMsg.text}</span>
+              </div>
+            {/if}
         </div>
       </section>
 
@@ -401,20 +421,48 @@
             </div>
           </div>
 
-           <div class="divider"></div>
+            <div class="divider"></div>
 
-           <div class="row">
-             <div class="icon-tile" style="background:var(--brand-soft)">
-               <Icon name="refresh" size={22} color="var(--brand)" />
-             </div>
+            <!-- Current version remains visible even before manual checking finishes. -->
+            <div class="row">
+              <div class="icon-tile" style="background:var(--brand-soft)">
+                <Icon name="info" size={22} color="var(--brand)" />
+              </div>
+              <div class="grow">
+                <p class="h-sm" style="margin:0">Versi {updateInfo ? `v${updateInfo.current}` : "Memeriksa…"}</p>
+              </div>
+              {#if updateInfo?.updateAvailable}
+                <span class="badge badge-warn"><span class="badge-dot"></span>Update tersedia</span>
+              {/if}
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="row">
+              <div class="icon-tile" style="background:var(--brand-soft)">
+                <Icon name="refresh" size={22} color="var(--brand)" />
+              </div>
              <div class="grow">
                <p class="h-sm" style="margin:0">Pembaruan Otomatis</p>
                <p class="text-muted" style="margin:2px 0 0;font-size:12px">Periksa versi terbaru aplikasi dari GitHub Releases.</p>
              </div>
-             <button class="btn btn-secondary btn-sm" onclick={runUpdateCheck} disabled={checkingUpdate}>
-               <Icon name="refresh" size={15} /> {checkingUpdate ? "Memeriksa…" : "Cek Pembaruan"}
-             </button>
-           </div>
+              <button class="btn btn-secondary btn-sm" onclick={runUpdateCheck} disabled={checkingUpdate}>
+                <Icon name="refresh" size={15} /> {checkingUpdate ? "Memeriksa…" : "Cek Pembaruan"}
+              </button>
+            </div>
+
+            {#if updateMsg}
+              <div
+                class="row"
+                style="padding:10px 12px;border-radius:12px;gap:8px;font-size:13px;font-weight:600;background:{updateMsg.ok ? 'var(--pos-soft)' : 'var(--neg-soft)'};color:{updateMsg.ok ? 'var(--pos-ink)' : 'var(--neg-ink)'}"
+              >
+                <Icon name={updateMsg.ok ? "check" : "alert"} size={16} />
+                <span class="grow">{updateMsg.text}</span>
+                {#if updateInfo?.updateAvailable && updateInfo.url}
+                  <button class="btn btn-primary btn-sm" onclick={openReleasePage}>Unduh</button>
+                {/if}
+              </div>
+            {/if}
 
            <div class="divider"></div>
 

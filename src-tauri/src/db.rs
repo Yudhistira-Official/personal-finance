@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::models::{
-    Account, AccountType, Category, CategorySpend, DashboardSummary, SavingsPocket, SyncStatus,
+    Account, AccountType, Category, CategorySpend, DashboardSummary, InvestmentTransaction,
+    MutualFundProduct, Obligation, ObligationSummary, PortfolioSnapshot, SavingsPocket, SyncStatus,
     Transaction as PfTransaction, TxType,
 };
 
@@ -38,6 +39,16 @@ impl AppState {
 }
 
 pub fn init_db(conn: &Connection) -> Result<(), String> {
+    // Deteksi sebelum CREATE: apakah FTS5 sudah ada di DB ini (DB lama = belum).
+    // Catatan: COUNT(*) pada external-content FTS5 membaca tabel content, BUKAN
+    // jumlah baris index — jadi COUNT tidak bisa dipakai untuk deteksi index kosong.
+    let fts_existed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bibit_products_fts')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS accounts (
@@ -66,6 +77,52 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY, value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS bibit_products_cache (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, fund_type TEXT NOT NULL,
+          manager_name TEXT NOT NULL, is_syariah INTEGER NOT NULL DEFAULT 0,
+          current_nav REAL NOT NULL, return_1d REAL, return_1y REAL, aum REAL,
+          min_buy INTEGER DEFAULT 10000, last_fetched_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS investment_transactions (
+          id TEXT PRIMARY KEY, product_id TEXT NOT NULL, account_id TEXT NOT NULL,
+          tx_type TEXT NOT NULL, units REAL NOT NULL, nav_per_unit REAL NOT NULL,
+          total_amount INTEGER NOT NULL, fee INTEGER NOT NULL DEFAULT 0,
+          date INTEGER NOT NULL, note TEXT,
+          FOREIGN KEY(product_id) REFERENCES bibit_products_cache(id),
+          FOREIGN KEY(account_id) REFERENCES accounts(id)
+        );
+        CREATE TABLE IF NOT EXISTS portfolio_daily_snapshots (
+          day INTEGER PRIMARY KEY,
+          total_value INTEGER NOT NULL,
+          total_invested INTEGER NOT NULL,
+          unrealized_pnl INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS obligations (
+          id TEXT PRIMARY KEY, direction TEXT NOT NULL, counterparty TEXT NOT NULL, title TEXT NOT NULL,
+          original_amount INTEGER NOT NULL, remaining_amount INTEGER NOT NULL, due_date INTEGER,
+          note TEXT, status TEXT NOT NULL DEFAULT 'OPEN', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bibit_name ON bibit_products_cache(name);
+        CREATE INDEX IF NOT EXISTS idx_bibit_type ON bibit_products_cache(fund_type);
+        CREATE VIRTUAL TABLE IF NOT EXISTS bibit_products_fts USING fts5(
+          name, manager_name,
+          content='bibit_products_cache', content_rowid='rowid',
+          tokenize='trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS bibit_ai AFTER INSERT ON bibit_products_cache BEGIN
+          INSERT INTO bibit_products_fts(rowid, name, manager_name)
+          VALUES (new.rowid, new.name, new.manager_name);
+        END;
+        CREATE TRIGGER IF NOT EXISTS bibit_ad AFTER DELETE ON bibit_products_cache BEGIN
+          INSERT INTO bibit_products_fts(bibit_products_fts, rowid, name, manager_name)
+          VALUES('delete', old.rowid, old.name, old.manager_name);
+        END;
+        CREATE TRIGGER IF NOT EXISTS bibit_au AFTER UPDATE ON bibit_products_cache BEGIN
+          INSERT INTO bibit_products_fts(bibit_products_fts, rowid, name, manager_name)
+          VALUES('delete', old.rowid, old.name, old.manager_name);
+          INSERT INTO bibit_products_fts(rowid, name, manager_name)
+          VALUES (new.rowid, new.name, new.manager_name);
+        END;
         ",
     )
     .map_err(|e| format!("init_db: {e}"))?;
@@ -77,6 +134,15 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
         .unwrap_or(0);
     if cnt == 0 {
         seed_categories(conn)?;
+    }
+
+    // Backfill FTS untuk DB lama yang sudah punya cache sebelum FTS5 diperkenalkan:
+    // virtual table baru dibuat kosong dan trigger hanya menjaga tulis berikutnya,
+    // jadi tanpa rebuild ini search >=3 char return 0 sampai sync berikutnya.
+    // Ter-guard: hanya saat FTS baru saja dibuat (fresh install / cache kosong → no-op).
+    if !fts_existed {
+        conn.execute_batch("INSERT INTO bibit_products_fts(bibit_products_fts) VALUES('rebuild');")
+            .map_err(|e| format!("fts backfill: {e}"))?;
     }
     Ok(())
 }
@@ -483,6 +549,321 @@ pub fn export_transactions_csv(
     Ok(out)
 }
 
+// ── Bibit / Reksa Dana helpers ───────────────────────────────────────────────
+
+/// Maps one `bibit_products_cache` row to a `MutualFundProduct`.
+///
+/// `return_1d`, `return_1y`, `aum` are read as `Option<f64>` because the cache
+/// columns are nullable (Bibit omits metrics for young funds).
+fn row_to_bibit_product(r: &rusqlite::Row<'_>) -> Result<MutualFundProduct, rusqlite::Error> {
+    Ok(MutualFundProduct {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        fund_type: r.get("fund_type")?,
+        manager_name: r.get("manager_name")?,
+        is_syariah: r.get::<_, i64>("is_syariah")? != 0,
+        current_nav: r.get("current_nav")?,
+        return_1d: r.get::<_, Option<f64>>("return_1d")?,
+        return_1y: r.get::<_, Option<f64>>("return_1y")?,
+        aum: r.get::<_, Option<f64>>("aum")?,
+        min_buy: r.get("min_buy")?,
+        last_fetched_at: r.get("last_fetched_at")?,
+    })
+}
+
+/// Maps one `investment_transactions` row to an `InvestmentTransaction`.
+/// `note` stays optional — the UI leaves it blank instead of storing an empty string.
+fn row_to_investment_tx(r: &rusqlite::Row<'_>) -> Result<InvestmentTransaction, rusqlite::Error> {
+    Ok(InvestmentTransaction {
+        id: r.get("id")?,
+        product_id: r.get("product_id")?,
+        account_id: r.get("account_id")?,
+        tx_type: r.get("tx_type")?,
+        units: r.get("units")?,
+        nav_per_unit: r.get("nav_per_unit")?,
+        total_amount: r.get("total_amount")?,
+        fee: r.get("fee")?,
+        date: r.get("date")?,
+        note: r.get::<_, Option<String>>("note")?,
+    })
+}
+
+/// Inserts a product, or refreshes every field of the existing row on `id` conflict.
+///
+/// Keeps the cache idempotent so repeated polling of the Bibit catalogue never
+/// duplicates rows; `last_fetched_at` in the payload marks the snapshot age.
+pub fn bibit_product_upsert(conn: &Connection, p: &MutualFundProduct) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO bibit_products_cache (
+            id, name, fund_type, manager_name, is_syariah, current_nav,
+            return_1d, return_1y, aum, min_buy, last_fetched_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, fund_type=excluded.fund_type,
+            manager_name=excluded.manager_name, is_syariah=excluded.is_syariah,
+            current_nav=excluded.current_nav, return_1d=excluded.return_1d,
+            return_1y=excluded.return_1y, aum=excluded.aum,
+            min_buy=excluded.min_buy, last_fetched_at=excluded.last_fetched_at",
+        params![
+            p.id,
+            p.name,
+            p.fund_type,
+            p.manager_name,
+            p.is_syariah as i64,
+            p.current_nav,
+            p.return_1d,
+            p.return_1y,
+            p.aum,
+            p.min_buy,
+            p.last_fetched_at
+        ],
+    )
+    .map_err(|e| format!("bibit_product_upsert: {e}"))?;
+    Ok(())
+}
+
+/// Rebuilds the FTS index from the cache table in one pass.
+///
+/// Per-row triggers keep the index fresh during individual upserts, but rebuilding
+/// once is far cheaper than 2943 incremental updates after a bulk catalogue sync.
+#[allow(dead_code)]
+pub fn rebuild_bibit_fts(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO bibit_products_fts(bibit_products_fts) VALUES('rebuild')",
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("rebuild_bibit_fts: {e}"))
+}
+
+/// Searches the cached catalogue by product/manager name, optionally narrowed to one fund type.
+///
+/// Empty query returns the 5 alphabetically-first products; ≥3 chars uses the FTS5 trigram
+/// index (quoted so FTS operators stay literal); 1–2 chars falls back to LIKE because the
+/// trigram index cannot index such short terms. Capped at 50 hits, sorted by name.
+pub fn bibit_product_search(
+    conn: &Connection,
+    query: &str,
+    fund_type: Option<&str>,
+) -> Result<Vec<MutualFundProduct>, String> {
+    let trimmed = query.trim();
+    let (sql, p1): (&str, String) = if trimmed.is_empty() {
+        (
+            "SELECT * FROM bibit_products_cache
+             WHERE (?2 IS NULL OR fund_type = ?2)
+             ORDER BY name LIMIT 5",
+            String::new(),
+        )
+    } else if trimmed.chars().count() >= 3 {
+        // Wrap in double quotes ("" escapes an embedded quote) so user text can never be
+        // parsed as FTS5 operators and multi-word input stays one ordered phrase.
+        (
+            "SELECT c.* FROM bibit_products_cache c
+             JOIN bibit_products_fts f ON f.rowid = c.rowid
+             WHERE bibit_products_fts MATCH ?1
+               AND (?2 IS NULL OR c.fund_type = ?2)
+             ORDER BY c.name LIMIT 50",
+            format!("\"{}\"", trimmed.replace('"', "\"\"")),
+        )
+    } else {
+        // Escape backslash duluan (jika tidak, \% akan berubah lagi jadi \\%),
+        // lalu % dan _ supaya wildcard user diperlakukan literal, sama seperti
+        // cabang FTS. ESCAPE '\' di SQL mendeklarasikan karakter escape-nya.
+        let escaped = trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        (
+            "SELECT * FROM bibit_products_cache
+             WHERE (name LIKE '%'||?1||'%' ESCAPE '\\' OR manager_name LIKE '%'||?1||'%' ESCAPE '\\')
+               AND (?2 IS NULL OR fund_type = ?2)
+             ORDER BY name LIMIT 50",
+            escaped,
+        )
+    };
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("bibit_product_search: {e}"))?;
+    let rows = stmt
+        .query_map(params![p1, fund_type], row_to_bibit_product)
+        .map_err(|e| format!("bibit_product_search: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("bibit_product_search: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Returns the whole cached catalogue sorted by name — used for the product list view.
+pub fn bibit_products_all(conn: &Connection) -> Result<Vec<MutualFundProduct>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM bibit_products_cache ORDER BY name")
+        .map_err(|e| format!("bibit_products_all: {e}"))?;
+    let rows = stmt
+        .query_map([], row_to_bibit_product)
+        .map_err(|e| format!("bibit_products_all: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("bibit_products_all: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Records one BUY / SELL / DIVIDEND transaction for the portfolio aggregation.
+pub fn investment_tx_insert(conn: &Connection, t: &InvestmentTransaction) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO investment_transactions (
+            id, product_id, account_id, tx_type, units, nav_per_unit,
+            total_amount, fee, date, note
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            t.id,
+            t.product_id,
+            t.account_id,
+            t.tx_type,
+            t.units,
+            t.nav_per_unit,
+            t.total_amount,
+            t.fee,
+            t.date,
+            t.note
+        ],
+    )
+    .map_err(|e| format!("investment_tx_insert: {e}"))?;
+    Ok(())
+}
+
+/// Lists every investment transaction, newest first — feeds the riwayat investment list.
+pub fn investment_tx_all(conn: &Connection) -> Result<Vec<InvestmentTransaction>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM investment_transactions ORDER BY date DESC")
+        .map_err(|e| format!("investment_tx_all: {e}"))?;
+    let rows = stmt
+        .query_map([], row_to_investment_tx)
+        .map_err(|e| format!("investment_tx_all: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("investment_tx_all: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Lists transactions of one product, newest first — per-holding transaction drill-down.
+#[allow(dead_code)] // disiapkan untuk UI drill-down holding (belum dipakai command)
+pub fn investment_tx_by_product(
+    conn: &Connection,
+    product_id: &str,
+) -> Result<Vec<InvestmentTransaction>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM investment_transactions WHERE product_id=?1 ORDER BY date DESC")
+        .map_err(|e| format!("investment_tx_by_product: {e}"))?;
+    let rows = stmt
+        .query_map(params![product_id], row_to_investment_tx)
+        .map_err(|e| format!("investment_tx_by_product: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("investment_tx_by_product: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn row_to_obligation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Obligation> {
+    Ok(Obligation {
+        id: row.get(0)?,
+        direction: row.get(1)?,
+        counterparty: row.get(2)?,
+        title: row.get(3)?,
+        original_amount: row.get(4)?,
+        remaining_amount: row.get(5)?,
+        due_date: row.get(6)?,
+        note: row.get(7)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+pub fn obligations_all(conn: &Connection) -> Result<Vec<Obligation>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id,direction,counterparty,title,original_amount,remaining_amount,due_date,note,status,created_at,updated_at FROM obligations ORDER BY status ASC, due_date ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], row_to_obligation)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+pub fn obligation_one(conn: &Connection, id: &str) -> Result<Option<Obligation>, String> {
+    conn.query_row(
+        "SELECT id,direction,counterparty,title,original_amount,remaining_amount,due_date,note,status,created_at,updated_at FROM obligations WHERE id=?1",
+        params![id], row_to_obligation,
+    ).optional().map_err(|e| e.to_string())
+}
+
+pub fn obligation_insert(conn: &Connection, o: &Obligation) -> Result<(), String> {
+    conn.execute("INSERT INTO obligations(id,direction,counterparty,title,original_amount,remaining_amount,due_date,note,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![o.id, o.direction, o.counterparty, o.title, o.original_amount, o.remaining_amount, o.due_date, o.note, o.status, o.created_at, o.updated_at]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+pub fn obligation_update(conn: &Connection, o: &Obligation) -> Result<(), String> {
+    conn.execute("UPDATE obligations SET direction=?1,counterparty=?2,title=?3,original_amount=?4,remaining_amount=?5,due_date=?6,note=?7,status=?8,updated_at=?9 WHERE id=?10", params![o.direction, o.counterparty, o.title, o.original_amount, o.remaining_amount, o.due_date, o.note, o.status, o.updated_at, o.id]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+pub fn obligation_delete(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM obligations WHERE id=?1", params![id])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub fn obligation_summary(conn: &Connection) -> Result<ObligationSummary, String> {
+    conn.query_row("SELECT COALESCE(SUM(CASE WHEN status='OPEN' AND direction='DEBT' THEN remaining_amount ELSE 0 END),0), COALESCE(SUM(CASE WHEN status='OPEN' AND direction='RECEIVABLE' THEN remaining_amount ELSE 0 END),0), COALESCE(SUM(CASE WHEN status='OPEN' AND due_date IS NOT NULL AND due_date < ?1 THEN 1 ELSE 0 END),0) FROM obligations", params![chrono::Utc::now().timestamp()], |r| Ok(ObligationSummary { total_debt: r.get(0)?, total_receivable: r.get(1)?, overdue_count: r.get(2)? })).map_err(|e| e.to_string())
+}
+
+// ── Snapshot portofolio harian ───────────────────────────────────────────────
+
+/// Insert or replace the daily portfolio snapshot (one row per local midnight).
+pub fn snapshot_upsert(
+    conn: &Connection,
+    day: i64,
+    total_value: i64,
+    total_invested: i64,
+    unrealized_pnl: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO portfolio_daily_snapshots
+         (day, total_value, total_invested, unrealized_pnl)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![day, total_value, total_invested, unrealized_pnl],
+    )
+    .map_err(|e| format!("snapshot_upsert: {e}"))?;
+    Ok(())
+}
+
+/// Returns the most recent daily snapshots, newest day first.
+pub fn snapshots_last(conn: &Connection, days: i64) -> Result<Vec<PortfolioSnapshot>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT day, total_value, total_invested, unrealized_pnl
+             FROM portfolio_daily_snapshots ORDER BY day DESC LIMIT ?1",
+        )
+        .map_err(|e| format!("snapshots_last: {e}"))?;
+    let rows = stmt
+        .query_map(params![days], |r| {
+            Ok(PortfolioSnapshot {
+                day: r.get(0)?,
+                total_value: r.get(1)?,
+                total_invested: r.get(2)?,
+                unrealized_pnl: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("snapshots_last: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("snapshots_last: {e}"))?);
+    }
+    Ok(out)
+}
+
 pub fn pending_count(conn: &Connection) -> u32 {
     conn.query_row(
         "SELECT COUNT(*) FROM transactions WHERE sync_status='pending' OR sync_status='failed'",
@@ -493,8 +874,187 @@ pub fn pending_count(conn: &Connection) -> u32 {
 }
 
 pub fn reset_all_data(conn: &Connection) -> Result<(), String> {
+    // investment_transactions dihapus lebih dulu karena ber-FK ke accounts dan
+    // bibit_products_cache (PRAGMA foreign_keys=ON akan menolak urutan terbalik).
     conn.execute_batch(
-        "DELETE FROM transactions; DELETE FROM savings_pockets; DELETE FROM accounts;",
+        "DELETE FROM investment_transactions; DELETE FROM bibit_products_cache; DELETE FROM transactions; DELETE FROM savings_pockets; DELETE FROM accounts; DELETE FROM obligations;",
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod bibit_search_tests {
+    use super::*;
+
+    /// Opens an in-memory DB through `init_db` and seeds three catalogue products.
+    fn seeded() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        for (i, name) in ["Mandiri Investa BCA", "BCA Prima Dana", "Reksa Dana Sukun"]
+            .iter()
+            .enumerate()
+        {
+            let p = MutualFundProduct {
+                id: format!("p{i}"),
+                name: name.to_string(),
+                fund_type: "Pasar Uang".into(),
+                manager_name: "Bca".into(),
+                is_syariah: false,
+                current_nav: 1.0,
+                return_1d: None,
+                return_1y: None,
+                aum: None,
+                min_buy: 10000,
+                last_fetched_at: 0,
+            };
+            bibit_product_upsert(&conn, &p).unwrap();
+        }
+        conn
+    }
+
+    fn names(v: &Vec<MutualFundProduct>) -> Vec<String> {
+        v.iter().map(|x| x.name.clone()).collect()
+    }
+
+    /// Trigram path (≥3 chars): mid-string and case-insensitive match, alphabetical order,
+    /// FTS operator text treated literally, fund_type filter, and trigger-driven refresh.
+    #[test]
+    fn fts_matches_substrings_and_survives_operator_text() {
+        let c = seeded();
+        assert_eq!(
+            names(&bibit_product_search(&c, "bca", None).unwrap()),
+            ["BCA Prima Dana", "Mandiri Investa BCA", "Reksa Dana Sukun"],
+            "trigram must match mid-name and inside manager_name, case-insensitive, sorted by name"
+        );
+        assert_eq!(
+            names(&bibit_product_search(&c, "MANDIRI", None).unwrap()),
+            ["Mandiri Investa BCA"]
+        );
+        assert_eq!(
+            names(&bibit_product_search(&c, "investa bca", None).unwrap()),
+            ["Mandiri Investa BCA"],
+            "multi-word query must stay one ordered phrase"
+        );
+        assert_eq!(
+            bibit_product_search(&c, "' OR 1=1 --\"", None)
+                .unwrap()
+                .len(),
+            0,
+            "quoted MATCH must not error nor match everything"
+        );
+        assert_eq!(
+            bibit_product_search(&c, "bca", Some("Obligasi"))
+                .unwrap()
+                .len(),
+            0
+        );
+        let mut p = bibit_product_search(&c, "sukun", None).unwrap().remove(0);
+        p.name = "Renamed Foo".into();
+        bibit_product_upsert(&c, &p).unwrap();
+        assert_eq!(bibit_product_search(&c, "sukun", None).unwrap().len(), 0);
+        assert_eq!(bibit_product_search(&c, "renamed", None).unwrap().len(), 1);
+    }
+
+    /// LIKE fallback (1–2 chars): trigram cannot index such short terms, so they must still
+    /// return substring hits instead of an empty picker.
+    #[test]
+    fn short_query_falls_back_to_like() {
+        let c = seeded();
+        assert_eq!(bibit_product_search(&c, "bc", None).unwrap().len(), 3);
+        assert_eq!(bibit_product_search(&c, "su", None).unwrap().len(), 1);
+        assert!(bibit_product_search(&c, "%", None).unwrap().is_empty());
+        assert!(bibit_product_search(&c, "_", None).unwrap().is_empty());
+    }
+
+    /// Empty query keeps the 5-first alphabetical default list.
+    #[test]
+    fn empty_query_returns_defaults() {
+        let c = seeded();
+        assert_eq!(bibit_product_search(&c, "   ", None).unwrap().len(), 3);
+    }
+
+    /// Bulk rebuild repopulates the index from the content table.
+    #[test]
+    fn rebuild_resyncs_index() {
+        let c = seeded();
+        rebuild_bibit_fts(&c).unwrap();
+        assert_eq!(bibit_product_search(&c, "bca", None).unwrap().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod obligations_tests {
+    use super::*;
+
+    fn open_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn
+    }
+
+    fn obligation(id: &str, direction: &str, amount: i64, status: &str) -> Obligation {
+        Obligation {
+            id: id.into(),
+            direction: direction.into(),
+            counterparty: "Bank".into(),
+            title: "Pinjaman".into(),
+            original_amount: amount,
+            remaining_amount: amount,
+            due_date: None,
+            note: None,
+            status: status.into(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn crud_and_summary_work() {
+        let c = open_db();
+        let o1 = obligation("o1", "DEBT", 100, "OPEN");
+        let o2 = obligation("o2", "RECEIVABLE", 200, "OPEN");
+        obligation_insert(&c, &o1).unwrap();
+        obligation_insert(&c, &o2).unwrap();
+        assert_eq!(obligations_all(&c).unwrap().len(), 2);
+        let s = obligation_summary(&c).unwrap();
+        assert_eq!(s.total_debt, 100);
+        assert_eq!(s.total_receivable, 200);
+        assert_eq!(s.overdue_count, 0);
+
+        let mut o1 = o1;
+        o1.remaining_amount = 50;
+        obligation_update(&c, &o1).unwrap();
+        assert_eq!(
+            obligation_one(&c, "o1").unwrap().unwrap().remaining_amount,
+            50
+        );
+
+        obligation_delete(&c, "o2").unwrap();
+        assert!(obligation_one(&c, "o2").unwrap().is_none());
+        let s = obligation_summary(&c).unwrap();
+        assert_eq!(s.total_debt, 50);
+        assert_eq!(s.total_receivable, 0);
+    }
+
+    #[test]
+    fn summary_counts_overdue_open() {
+        let c = open_db();
+        let mut o = obligation("o1", "DEBT", 100, "OPEN");
+        o.due_date = Some(chrono::Utc::now().timestamp() - 1);
+        obligation_insert(&c, &o).unwrap();
+        let s = obligation_summary(&c).unwrap();
+        assert_eq!(s.overdue_count, 1);
+        o.status = "DONE".into();
+        obligation_update(&c, &o).unwrap();
+        let s = obligation_summary(&c).unwrap();
+        assert_eq!(s.overdue_count, 0);
+    }
+
+    #[test]
+    fn reset_all_data_clears_obligations() {
+        let c = open_db();
+        obligation_insert(&c, &obligation("o1", "DEBT", 100, "OPEN")).unwrap();
+        reset_all_data(&c).unwrap();
+        assert_eq!(obligations_all(&c).unwrap().len(), 0);
+    }
 }

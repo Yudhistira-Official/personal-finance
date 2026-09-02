@@ -42,7 +42,10 @@
     loading = true;
     err = "";
     try {
-      [accounts, categories] = await Promise.all([api.accounts_list(), api.categories_list()]);
+      [accounts, categories] = await Promise.all([
+        api.accounts_list(),
+        api.categories_list(),
+      ]);
     } catch (e: any) {
       err = String(e);
     }
@@ -240,9 +243,9 @@
             </span>
           </div>
         </div>
-      </div>
+       </div>
 
-      {#each groups as group}
+       {#each groups as group}
         {@const grouped = accountsFor(group.type)}
         {#if grouped.length}
           <section>
@@ -428,6 +431,8 @@
     </button>
   </div>
 </Modal>
+
+
 
 <style>
   .account-card {

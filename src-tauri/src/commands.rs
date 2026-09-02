@@ -1,9 +1,13 @@
-use tauri::State;
+use std::collections::{HashMap, HashSet};
+
+use tauri::{Manager, State};
 
 use crate::db::{self, AppState};
 use crate::models::{
     Account, AccountInput, AccountType, Category, CategoryInput, CategorySpend, DashboardSummary,
-    SavingsPocket, SavingsPocketInput, SyncInfo, SyncStatus, Transaction, TransactionInput, TxType,
+    InvestmentTransaction, MutualFundProduct, Obligation, ObligationInput, ObligationPayment,
+    ObligationSummary, PortfolioHolding, PortfolioSnapshot, PortfolioSummary, SavingsPocket,
+    SavingsPocketInput, SyncInfo, SyncStatus, Transaction, TransactionInput, TxType,
 };
 use crate::sync;
 
@@ -603,8 +607,548 @@ pub fn settings_save(
     db::save_settings(&c, &url, auto_sync)
 }
 
+/// Fetches Bibit's catalogue without holding SQLite's mutex across the network await,
+/// then replaces each cached product snapshot and returns the number processed.
+#[tauri::command]
+pub async fn sync_bibit_catalog(state: State<'_, AppState>) -> Result<u32, String> {
+    // Network I/O happens before locking so other IPC commands remain responsive.
+    let products = crate::bibit::BibitClient::new().fetch_catalog().await?;
+    let mut c = state.db.lock().map_err(|e| e.to_string())?;
+    // Bungkus batch upsert dalam satu transaksi: atomik (gagal di tengah tidak
+    // meninggalkan cache sebagian) dan jauh lebih cepat daripada ~3000 autocommit.
+    // Trigger AFTER INSERT/UPDATE tetap menjaga index FTS per baris, jadi tidak perlu
+    // rebuild manual setelah loop.
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    for product in &products {
+        db::bibit_product_upsert(&*tx, product)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(products.len() as u32)
+}
+
+/// Searches locally cached mutual-fund products by name/manager and optional fund type.
+///
+/// Fallback: if the local cache is empty and query non-empty, try Bibit's server-side
+/// search (`name=...`). This handles fresh installs and stale/sync-failed caches.
+/// The DB lock is never held across `await`; remote fetch happens first, then a
+/// short transaction caches the results so subsequent local searches hit FTS.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn search_mutual_funds(
+    state: State<'_, AppState>,
+    query: String,
+    fund_type: Option<String>,
+) -> Result<Vec<MutualFundProduct>, String> {
+    let local_results = {
+        let c = state.db.lock().map_err(|e| e.to_string())?;
+        db::bibit_product_search(&c, &query, fund_type.as_deref())?
+    };
+    if !local_results.is_empty() || query.trim().is_empty() {
+        return Ok(local_results);
+    }
+
+    // Remote search runs outside the SQLite lock to keep IPC responsive.
+    // Offline/remote failure: fall back to local results (empty in this branch)
+    // instead of propagating an error, so the UI shows no results without an error.
+    let remote_results = crate::bibit::BibitClient::new()
+        .search_remote(query.trim())
+        .await
+        .unwrap_or(local_results);
+
+    // Cache raw remote hits so later local searches (any fund_type) can reuse them.
+    if !remote_results.is_empty() {
+        let mut c = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = c.transaction().map_err(|e| e.to_string())?;
+        for product in &remote_results {
+            db::bibit_product_upsert(&*tx, product)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+
+    // The remote API ignores fund_type; filter locally before returning.
+    let mut results = remote_results;
+    if let Some(expected) = fund_type.as_deref() {
+        results.retain(|p| p.fund_type == expected);
+    }
+    Ok(results)
+}
+
+/// Validates, stores, and atomically applies one investment transaction to its cash account.
+#[tauri::command]
+pub fn record_investment_tx(
+    state: State<AppState>,
+    payload: InvestmentTransaction,
+) -> Result<InvestmentTransaction, String> {
+    // Reject unknown types first so DIVIDEND-specific rules below are unambiguous.
+    if !matches!(payload.tx_type.as_str(), "BUY" | "SELL" | "DIVIDEND") {
+        return Err("Tipe transaksi investasi tidak valid".into());
+    }
+    let is_dividend = payload.tx_type == "DIVIDEND";
+    // Cash dividends may carry zero units/NAV; only BUY/SELL must trade real units.
+    if !payload.units.is_finite() || (!is_dividend && payload.units <= 0.0) || payload.units < 0.0 {
+        return Err(if is_dividend {
+            "Units dividen tidak boleh negatif".into()
+        } else {
+            "Units harus > 0".into()
+        });
+    }
+    if !payload.nav_per_unit.is_finite()
+        || (!is_dividend && payload.nav_per_unit <= 0.0)
+        || payload.nav_per_unit < 0.0
+    {
+        return Err(if is_dividend {
+            "NAV dividen tidak boleh negatif".into()
+        } else {
+            "NAV harus > 0".into()
+        });
+    }
+    if payload.fee < 0 {
+        return Err("Fee tidak boleh negatif".into());
+    }
+
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    c.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        // Anti-oversell: SELL cannot exceed units owned (BUY minus prior SELL, f64).
+        if payload.tx_type == "SELL" {
+            let buy_units: f64 = c
+                .query_row(
+                    "SELECT COALESCE(SUM(units),0) FROM investment_transactions WHERE product_id=?1 AND tx_type='BUY'",
+                    rusqlite::params![payload.product_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let sell_units: f64 = c
+                .query_row(
+                    "SELECT COALESCE(SUM(units),0) FROM investment_transactions WHERE product_id=?1 AND tx_type='SELL'",
+                    rusqlite::params![payload.product_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let owned = buy_units - sell_units;
+            if payload.units > owned + 1e-9 {
+                return Err(format!(
+                    "Unit jual melebihi kepemilikan ({owned:.4} tersedia)"
+                ));
+            }
+        }
+
+        db::investment_tx_insert(&c, &payload)?;
+        // BUY pays total+fee; SELL receives total-fee; DIVIDEND receives total.
+        // checked_* prevents i64 overflow from maliciously huge IPC payloads.
+        let delta = match payload.tx_type.as_str() {
+            "BUY" => payload
+                .total_amount
+                .checked_add(payload.fee)
+                .map(|v| -v)
+                .ok_or("Nominal total + fee overflow")?,
+            "SELL" => payload.total_amount.saturating_sub(payload.fee).max(0),
+            _ => payload.total_amount,
+        };
+        c.execute(
+            "UPDATE accounts SET current_balance=current_balance+?1,updated_at=?2 WHERE id=?3",
+            rusqlite::params![delta, now_ts(), payload.account_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })();
+    match result {
+        Ok(()) => {
+            c.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+            Ok(payload)
+        }
+        Err(error) => {
+            let _ = c.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// Aggregates investment transactions into current holdings using cached NAV values.
+///
+/// Cost basis uses the average-cost method: a SELL removes cost proportionally
+/// (sold_units / units_before * cost_before), not the sale proceeds — realized
+/// gain must stay out of the remaining invested amount.
+pub(crate) fn compute_holdings(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<PortfolioHolding>, String> {
+    let transactions = db::investment_tx_all(conn)?;
+    let products = db::bibit_products_all(conn)?;
+    let product_map: HashMap<String, MutualFundProduct> = products
+        .into_iter()
+        .map(|product| (product.id.clone(), product))
+        .collect();
+    // Ledger per product: (units held, remaining cost basis) in f64 until final rounding.
+    let mut totals: HashMap<String, (f64, f64)> = HashMap::new();
+
+    // Replay chronologically (oldest first — investment_tx_all returns DESC).
+    for transaction in transactions.iter().rev() {
+        let entry = totals
+            .entry(transaction.product_id.clone())
+            .or_insert((0.0, 0.0));
+        match transaction.tx_type.as_str() {
+            "BUY" => {
+                entry.0 += transaction.units;
+                entry.1 += transaction.total_amount as f64;
+            }
+            "SELL" => {
+                if entry.0 > 0.0 {
+                    let sold = transaction.units.min(entry.0);
+                    // Remove proportional cost, then clamp so cost reaches 0 on full sell.
+                    entry.1 -= sold / entry.0 * entry.1;
+                    entry.0 -= sold;
+                    if entry.0 <= 1e-9 {
+                        entry.0 = 0.0;
+                        entry.1 = 0.0;
+                    }
+                }
+            }
+            // DIVIDEND is cash-only: it changes neither units nor cost basis.
+            _ => {}
+        }
+    }
+
+    let mut holdings = Vec::new();
+    for (product_id, (total_units, cost_total)) in totals {
+        // Guard: no units left means nothing to report, whatever the cost residue is.
+        if total_units <= 0.0 {
+            continue;
+        }
+        let total_invested = cost_total.max(0.0).round() as i64;
+        let product = product_map.get(&product_id);
+        let current_nav = product.map(|p| p.current_nav).unwrap_or(0.0);
+        let current_value = (total_units * current_nav).round() as i64;
+        let unrealized_pnl = current_value - total_invested;
+        holdings.push(PortfolioHolding {
+            product_id,
+            product_name: product.map(|p| p.name.clone()).unwrap_or_default(),
+            fund_type: product.map(|p| p.fund_type.clone()).unwrap_or_default(),
+            manager_name: product.map(|p| p.manager_name.clone()).unwrap_or_default(),
+            total_units,
+            avg_buy_nav: if total_units > 0.0 {
+                cost_total / total_units
+            } else {
+                0.0
+            },
+            total_invested,
+            current_nav,
+            current_value,
+            unrealized_pnl,
+            roi_percentage: if total_invested > 0 {
+                unrealized_pnl as f64 / total_invested as f64 * 100.0
+            } else {
+                0.0
+            },
+        });
+    }
+    Ok(holdings)
+}
+
+#[tauri::command]
+pub fn get_portfolio_holdings(state: State<AppState>) -> Result<Vec<PortfolioHolding>, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    compute_holdings(&c)
+}
+
+/// Records today's portfolio totals as one daily snapshot row (INSERT OR REPLACE per day).
+#[tauri::command]
+pub fn record_daily_snapshot(state: State<AppState>) -> Result<PortfolioSnapshot, String> {
+    record_daily_snapshot_from(&state)
+}
+
+/// Records today's portfolio snapshot without a Tauri `State` wrapper (background job path).
+fn record_daily_snapshot_from(state: &AppState) -> Result<PortfolioSnapshot, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    let holdings = compute_holdings(&c)?;
+    let total_value = holdings.iter().map(|h| h.current_value).sum::<i64>();
+    let total_invested = holdings.iter().map(|h| h.total_invested).sum::<i64>();
+    let unrealized_pnl = holdings.iter().map(|h| h.unrealized_pnl).sum::<i64>();
+    drop(c);
+    let day = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .unwrap()
+        .timestamp();
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::snapshot_upsert(&c, day, total_value, total_invested, unrealized_pnl)?;
+    Ok(PortfolioSnapshot {
+        day,
+        total_value,
+        total_invested,
+        unrealized_pnl,
+    })
+}
+#[tauri::command]
+pub fn get_portfolio_snapshots(
+    state: State<AppState>,
+    days: Option<i64>,
+) -> Result<Vec<PortfolioSnapshot>, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::snapshots_last(&c, days.unwrap_or(30))
+}
+
+/// Refreshes NAV for owned products only via per-product name-fragment searches,
+/// avoiding the full catalogue pagination that made the refresh feel stuck.
+/// (Bibit's search API matches by name, not product ID, so the query is derived
+/// from the cached product name; unmatched products keep their stale NAV.)
+async fn refresh_navs(state: &AppState) -> Result<u32, String> {
+    let (product_ids, held_names) = {
+        let c = state.db.lock().map_err(|e| e.to_string())?;
+        let transactions = db::investment_tx_all(&c)?;
+        let product_ids: HashSet<String> = transactions
+            .into_iter()
+            .map(|transaction| transaction.product_id)
+            .collect();
+        let products = db::bibit_products_all(&c)?;
+        let product_map: HashMap<String, String> = products
+            .into_iter()
+            .map(|product| (product.id, product.name))
+            .collect();
+        let held_names: HashMap<String, String> = product_ids
+            .iter()
+            .filter_map(|id| product_map.get(id).map(|name| (id.clone(), name.clone())))
+            .collect();
+        (product_ids, held_names)
+    };
+    if product_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let navs = crate::bibit::BibitClient::new()
+        .fetch_nav_batch(&held_names)
+        .await?;
+    let now = now_ts();
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    let mut refreshed = 0;
+    for (product_id, current_nav) in navs {
+        // Skip missing products so a failed lookup never overwrites cached NAV.
+        c.execute(
+            "UPDATE bibit_products_cache SET current_nav=?1,last_fetched_at=?2 WHERE id=?3",
+            rusqlite::params![current_nav, now, product_id],
+        )
+        .map_err(|e| e.to_string())?;
+        refreshed += 1;
+    }
+    Ok(refreshed)
+}
+
+#[tauri::command]
+pub async fn refresh_portfolio_nav(state: State<'_, AppState>) -> Result<u32, String> {
+    refresh_navs(&state).await
+}
+
+fn obligation_from_input(
+    input: ObligationInput,
+    existing: Option<Obligation>,
+) -> Result<Obligation, String> {
+    let counterparty = input.counterparty.trim();
+    let title = input.title.trim();
+    if counterparty.is_empty() || title.is_empty() {
+        return Err("Counterparty dan judul wajib diisi".into());
+    }
+    if !matches!(input.direction.as_str(), "DEBT" | "RECEIVABLE") {
+        return Err("Arah obligasi tidak valid".into());
+    }
+    if input.original_amount <= 0 {
+        return Err("Nominal asli harus > 0".into());
+    }
+    let remaining = input
+        .remaining_amount
+        .unwrap_or(input.original_amount)
+        .clamp(0, input.original_amount);
+    let now = now_ts();
+    let old = existing.unwrap_or_else(|| Obligation {
+        id: uuid::Uuid::new_v4().to_string(),
+        direction: String::new(),
+        counterparty: String::new(),
+        title: String::new(),
+        original_amount: 0,
+        remaining_amount: 0,
+        due_date: None,
+        note: None,
+        status: String::new(),
+        created_at: now,
+        updated_at: now,
+    });
+    Ok(Obligation {
+        id: old.id,
+        direction: input.direction,
+        counterparty: counterparty.to_string(),
+        title: title.to_string(),
+        original_amount: input.original_amount,
+        remaining_amount: remaining,
+        due_date: input.due_date,
+        note: input.note.filter(|v| !v.trim().is_empty()),
+        status: if remaining == 0 {
+            "DONE".into()
+        } else {
+            "OPEN".into()
+        },
+        created_at: old.created_at,
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub fn obligations_list(state: State<AppState>) -> Result<Vec<Obligation>, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::obligations_all(&c)
+}
+
+#[tauri::command]
+pub fn obligations_summary(state: State<AppState>) -> Result<ObligationSummary, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::obligation_summary(&c)
+}
+
+#[tauri::command]
+pub fn obligation_create(
+    state: State<AppState>,
+    input: ObligationInput,
+) -> Result<Obligation, String> {
+    let o = obligation_from_input(input, None)?;
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::obligation_insert(&c, &o)?;
+    Ok(o)
+}
+
+#[tauri::command]
+pub fn obligation_update(
+    state: State<AppState>,
+    id: String,
+    input: ObligationInput,
+) -> Result<Obligation, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    let old = db::obligation_one(&c, &id)?.ok_or("Obligasi tidak ditemukan")?;
+    let o = obligation_from_input(input, Some(old))?;
+    db::obligation_update(&c, &o)?;
+    Ok(o)
+}
+
+#[tauri::command]
+pub fn obligation_delete(state: State<AppState>, id: String) -> Result<(), String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    db::obligation_delete(&c, &id)
+}
+
+#[tauri::command]
+pub fn obligation_pay(
+    state: State<AppState>,
+    payment: ObligationPayment,
+) -> Result<Obligation, String> {
+    if payment.amount <= 0 {
+        return Err("Nominal pembayaran harus > 0".into());
+    }
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    c.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut o =
+            db::obligation_one(&c, &payment.obligation_id)?.ok_or("Obligasi tidak ditemukan")?;
+        if payment.amount > o.remaining_amount {
+            return Err("Pembayaran melebihi sisa obligasi".into());
+        }
+        let remaining = o.remaining_amount - payment.amount;
+        let date = payment.date.unwrap_or_else(now_ts);
+        if let Some(account_id) = payment.account_id {
+            let tx_type = if o.direction == "DEBT" {
+                TxType::Expense
+            } else {
+                TxType::Income
+            };
+            let category_type = tx_type.as_str();
+            let category_id: String = c
+                .query_row(
+                    "SELECT id FROM categories WHERE category_type=?1 ORDER BY name LIMIT 1",
+                    rusqlite::params![category_type],
+                    |r| r.get(0),
+                )
+                .map_err(|_| "Kategori transaksi tidak tersedia".to_string())?;
+            let tx = Transaction {
+                id: uuid::Uuid::new_v4().to_string(),
+                account_id: account_id.clone(),
+                destination_account_id: None,
+                category_id,
+                amount: payment.amount,
+                transaction_type: tx_type,
+                date,
+                note: format!("Pembayaran {}: {}", o.direction, o.title),
+                receipt_url: None,
+                sync_status: SyncStatus::Pending,
+                sheet_row_id: None,
+            };
+            db::transactions_insert(&c, &tx)?;
+            let delta = if tx_type == TxType::Expense {
+                -payment.amount
+            } else {
+                payment.amount
+            };
+            if c.execute(
+                "UPDATE accounts SET current_balance=current_balance+?1,updated_at=?2 WHERE id=?3",
+                rusqlite::params![delta, now_ts(), account_id],
+            )
+            .map_err(|e| e.to_string())?
+                == 0
+            {
+                return Err("Akun tidak ditemukan".into());
+            }
+        }
+        o.remaining_amount = remaining;
+        o.status = if remaining == 0 {
+            "DONE".into()
+        } else {
+            "OPEN".into()
+        };
+        o.updated_at = now_ts();
+        db::obligation_update(&c, &o)?;
+        Ok(o)
+    })();
+    match result {
+        Ok(o) => {
+            c.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+            Ok(o)
+        }
+        Err(e) => {
+            let _ = c.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn portfolio_summary(state: State<AppState>) -> Result<PortfolioSummary, String> {
+    let c = state.db.lock().map_err(|e| e.to_string())?;
+    let holdings = compute_holdings(&c)?;
+    Ok(PortfolioSummary {
+        total_value: holdings.iter().map(|h| h.current_value).sum(),
+        total_invested: holdings.iter().map(|h| h.total_invested).sum(),
+        unrealized_pnl: holdings.iter().map(|h| h.unrealized_pnl).sum(),
+    })
+}
+
 #[tauri::command]
 pub fn reset_data(state: State<AppState>) -> Result<(), String> {
     let c = state.db.lock().map_err(|e| e.to_string())?;
     db::reset_all_data(&c)
+}
+
+// ── Background job: daily NAV refresh + snapshot ─────────────────────────────
+
+/// Refreshes owned-product NAVs and records today's portfolio snapshot.
+/// All failures are swallowed into eprintln — background tasks must never crash the app.
+pub async fn daily_portfolio_job(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    match refresh_navs(&state).await {
+        Ok(refreshed) => eprintln!("daily_portfolio_job: refreshed {refreshed} NAV"),
+        Err(e) => eprintln!("daily_portfolio_job: refresh NAV failed: {e}"),
+    }
+    match record_daily_snapshot_from(&state) {
+        Ok(s) => eprintln!(
+            "daily_portfolio_job: snapshot day={} value={} invested={} pnl={}",
+            s.day, s.total_value, s.total_invested, s.unrealized_pnl
+        ),
+        Err(e) => eprintln!("daily_portfolio_job: snapshot failed: {e}"),
+    }
 }

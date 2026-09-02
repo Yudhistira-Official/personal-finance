@@ -229,3 +229,113 @@ pub struct SyncInfo {
     pub sheet_url: Option<String>,
     pub auto_sync: bool,
 }
+
+/// Produk reksa dana (cache dari Bibit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MutualFundProduct {
+    pub id: String,
+    pub name: String,
+    pub fund_type: String,
+    pub manager_name: String,
+    pub is_syariah: bool,
+    pub current_nav: f64,
+    pub return_1d: Option<f64>,
+    pub return_1y: Option<f64>,
+    pub aum: Option<f64>,
+    pub min_buy: i64,
+    pub last_fetched_at: i64,
+}
+
+/// Transaksi investasi reksa dana.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestmentTransaction {
+    pub id: String,
+    pub product_id: String,
+    pub account_id: String,
+    pub tx_type: String,
+    pub units: f64,
+    pub nav_per_unit: f64,
+    pub total_amount: i64,
+    pub fee: i64,
+    pub date: i64,
+    pub note: Option<String>,
+}
+
+/// Ringkasan kepemilikan portofolio (hasil agregasi DCA).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioHolding {
+    pub product_id: String,
+    pub product_name: String,
+    pub fund_type: String,
+    pub manager_name: String,
+    pub total_units: f64,
+    pub avg_buy_nav: f64,
+    pub total_invested: i64,
+    pub current_nav: f64,
+    pub current_value: i64,
+    pub unrealized_pnl: i64,
+    pub roi_percentage: f64,
+}
+
+/// Snapshot nilai portofolio harian (akumulasi dana dari modal awal).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioSnapshot {
+    /// Unix timestamp tengah malam lokal (awal hari) snapshot direkam.
+    pub day: i64,
+    pub total_value: i64,
+    pub total_invested: i64,
+    pub unrealized_pnl: i64,
+}
+
+/// Hutang / Piutang terhadap satu pihak (orang, toko, institusi).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Obligation {
+    pub id: String,
+    pub direction: String, // "DEBT" (hutang ke orang lain) | "RECEIVABLE" (piutang)
+    pub counterparty: String,
+    pub title: String,
+    pub original_amount: i64,
+    pub remaining_amount: i64,
+    pub due_date: Option<i64>,
+    pub note: Option<String>,
+    pub status: String, // "OPEN" | "DONE"
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Input untuk membuat / mengupdate hutang-piutang.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObligationInput {
+    pub direction: String,
+    pub counterparty: String,
+    pub title: String,
+    pub original_amount: i64,
+    pub remaining_amount: Option<i64>, // default = original_amount
+    pub due_date: Option<i64>,
+    pub note: Option<String>,
+}
+
+/// Pembayaran (sebagian / lunas) atas satu hutang-piutang.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObligationPayment {
+    pub obligation_id: String,
+    pub amount: i64,                // > 0
+    pub account_id: Option<String>, // bila Some: catat transaksi kas + ubah saldo
+    pub date: Option<i64>,
+}
+
+/// Ringkasan hutang-piutang yang masih OPEN.
+#[derive(Debug, Clone, Serialize)]
+pub struct ObligationSummary {
+    pub total_debt: i64,       // sum remaining OPEN DEBT
+    pub total_receivable: i64, // sum remaining OPEN RECEIVABLE
+    pub overdue_count: u32,    // OPEN dengan due_date < now
+}
+
+/// Ringkasan nilai portofolio investasi.
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioSummary {
+    pub total_value: i64,
+    pub total_invested: i64,
+    pub unrealized_pnl: i64,
+}

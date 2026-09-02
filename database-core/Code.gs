@@ -4,10 +4,11 @@
  */
 
 var SCHEMAS = {
-  Transactions: ['id', 'date', 'type', 'account_id', 'category_id', 'amount', 'note', 'updated_at'],
+  Transactions: ['id', 'date', 'type', 'account_id', 'destination_account_id', 'category_id', 'amount', 'note', 'updated_at'],
   Accounts: ['id', 'name', 'account_type', 'balance', 'is_active'],
   Savings: ['id', 'name', 'target_amount', 'current_amount', 'linked_account_id'],
-  Categories: ['id', 'name', 'type', 'icon', 'color']
+  Categories: ['id', 'name', 'type', 'icon', 'color'],
+  Investments: ['product_id', 'product_name', 'fund_type', 'manager_name', 'total_units', 'avg_buy_nav', 'current_nav', 'current_value', 'unrealized_pnl', 'roi_percentage', 'updated_at']
 };
 
 /**
@@ -78,6 +79,8 @@ function handlePost_(e) {
           tx.date || 0,
           tx.type || 'expense',
           String(tx.account_id || ''),
+          // Ikuti urutan SCHEMAS.Transactions: tujuan transfer tepat setelah account_id.
+          String(tx.destination_account_id || ''),
           String(tx.category_id || ''),
           tx.amount || 0,
           String(tx.note || ''),
@@ -114,6 +117,7 @@ function handlePost_(e) {
       if (data.accounts) overwriteSheet_('Accounts', data.accounts);
       if (data.savings) overwriteSheet_('Savings', data.savings);
       if (data.categories) overwriteSheet_('Categories', data.categories);
+      if (data.investments) overwriteSheet_('Investments', data.investments);
 
       return json_({
         success: true,
@@ -194,7 +198,8 @@ function buildFetchPayload_() {
     transactions: readSheet_('Transactions'),
     accounts: readSheet_('Accounts'),
     savings: readSheet_('Savings'),
-    categories: readSheet_('Categories')
+    categories: readSheet_('Categories'),
+    investments: readSheet_('Investments')
   };
 }
 

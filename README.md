@@ -88,7 +88,7 @@ Database Core adalah **endpoint Google Apps Script** yang menjadi database awan 
  */
 const PF_RAW_BASE = 'https://raw.githubusercontent.com/Yudhistira-Official/personal-finance/main/database-core/';
 const PF_CORE_FILE = 'Code.gs';
-const PF_CACHE_KEY = 'pf_dbcore_v3';
+const PF_CACHE_KEY = 'pf_dbcore_v4';
 const PF_CACHE_TTL = 1000; // detik
 
 // Referensi STATIS ke SpreadsheetApp. Kode SpreadsheetApp asli ada di dalam

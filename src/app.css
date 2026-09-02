@@ -325,6 +325,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   font-size: 11px; font-weight: 700;
   padding: 4px 9px; border-radius: 999px;
 }
+.badge-info { background: var(--info-soft); color: var(--info); }
+.badge-brand { background: var(--brand-soft); color: var(--brand-strong); }
 .badge-dot { width: 6px; height: 6px; border-radius: 50%; }
 .badge-pos { background: var(--pos-soft); color: var(--pos-ink); }
 .badge-pos .badge-dot { background: var(--pos); }
@@ -333,6 +335,10 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .badge-neg { background: var(--neg-soft); color: var(--neg-ink); }
 .badge-neg .badge-dot { background: var(--neg); }
 .badge-neutral { background: var(--surface-2); color: var(--muted); }
+.badge-money_market { background: var(--info-soft); color: #0369a1; }
+.badge-fixed_income { background: var(--pos-soft); color: var(--pos-ink); }
+.badge-balanced { background: var(--warn-soft); color: #b45309; }
+.badge-equity { background: var(--neg-soft); color: var(--neg-ink); }
 
 /* ============ Modal ============ */
 .modal-backdrop {

@@ -8,8 +8,10 @@
   const tabs = [
     { id: "riwayat", label: "Riwayat", path: "/riwayat", icon: "clock" },
     { id: "tabungan", label: "Tabungan", path: "/tabungan", icon: "piggy-bank" },
-    { id: "dashboard", label: "Beranda", path: "/", icon: "home", center: true },
     { id: "dompet", label: "Dompet", path: "/dompet", icon: "wallet" },
+    { id: "dashboard", label: "Beranda", path: "/", icon: "home", center: true },
+    { id: "portofolio", label: "Portofolio", path: "/portofolio", icon: "trending-up" },
+    { id: "hutang", label: "Hutang", path: "/hutang", icon: "arrow-left-right" },
     { id: "setelan", label: "Setelan", path: "/setelan", icon: "settings" },
   ];
   $: current = $page.url.pathname;
@@ -43,7 +45,7 @@
           class="nav-tab"
           class:active
         >
-          <Icon name={t.icon} size={22} color={active ? "var(--brand)" : "var(--muted)"} />
+          <Icon name={t.icon} size={20} color={active ? "var(--brand)" : "var(--muted)"} />
           <span class="nav-label">{t.label}</span>
         </a>
       {/if}
@@ -68,14 +70,17 @@
   }
 
   .nav-tab {
-    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
-    gap:4px; text-decoration:none; color:var(--muted);
-    font-size:10.5px; font-weight:700; padding:7px 2px; border-radius:14px;
+    flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:3px; text-decoration:none; color:var(--muted);
+    font-size:9px; font-weight:700; padding:6px 2px; border-radius:12px;
     transition:color var(--dur) var(--ease);
   }
   .nav-tab:active { transform:scale(0.94); }
   .nav-tab.active { color:var(--brand); }
-  .nav-label { line-height:1; letter-spacing:0.01em; }
+  .nav-label {
+    line-height:1; letter-spacing:0; text-align:center;
+    max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
 
   .center-btn {
     width:62px; height:62px; border-radius:22px; flex-shrink:0;

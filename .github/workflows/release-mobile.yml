@@ -1,0 +1,130 @@
+name: Release Mobile (Android + iOS)
+
+# Build Android APK (signed) and iOS app on version tags (v*).
+# Desktop builds are handled by release.yml (manual dispatch).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java (Android Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Init Android project
+        run: npx tauri android init
+
+      - name: Point NDK_HOME at installed NDK
+        run: |
+          NDK_DIR=$(ls -d "$ANDROID_HOME/ndk/"* | sort -V | tail -1)
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Write keystore.properties (signed release APK)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "ANDROID_KEYSTORE_BASE64 secret belum di-set — APK unsigned"; exit 0; fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          {
+            echo "storeFile=$RUNNER_TEMP/release.keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEYSTORE_PASSWORD"
+          } > src-tauri/gen/android/keystore.properties
+
+      - name: Build APK (arm64-v8a)
+        run: npx tauri android build --apk --target aarch64
+
+      - name: Collect APK
+        id: collect
+        run: |
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release*.apk" | head -1)
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "built: $APK"
+
+      - name: Upload APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Personal Finance ${{ github.ref_name }}"
+          draft: true
+          files: ${{ steps.collect.outputs.path }}
+
+  ios:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust with iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Init iOS project
+        run: npx tauri ios init
+
+      - name: Build iOS (unsigned device archive)
+        run: npx tauri ios build --target aarch64-apple-ios --no-sign
+        continue-on-error: true
+
+      - name: Upload iOS artifact (if built)
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Personal Finance ${{ github.ref_name }}"
+          draft: true
+          files: |
+            src-tauri/gen/apple/build/**/*.ipa
+            src-tauri/gen/apple/build/**/*.xcarchive

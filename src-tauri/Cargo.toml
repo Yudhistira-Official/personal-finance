@@ -1,6 +1,6 @@
 [package]
 name = "personal-finance"
-version = "0.2.0"
+version = "0.2.1"
 description = "Personal Finance - aplikasi manajemen keuangan pribadi (Tauri v2 + Rust)"
 authors = ["you"]
 edition = "2021"
